@@ -1,0 +1,9 @@
+# netlify.toml
+
+[build]
+  command = "echo 'No build command needed'"
+  publish = "public" # 随便指定一个不存在的目录，因为我们只用 Edge Function
+
+[[edge_functions]]
+  path = "/*" # 捕获所有路径的请求
+  function = "proxy" # 对应 netlify/edge-functions/proxy.ts 的文件名
