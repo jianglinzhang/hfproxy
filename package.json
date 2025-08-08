@@ -1,0 +1,14 @@
+{
+  "name": "hf-proxy",
+  "version": "1.0.0",
+  "description": "A reverse proxy for Hugging Face Space",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "http-proxy-middleware": "^3.0.0"
+  }
+}
