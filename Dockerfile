@@ -4,6 +4,7 @@ WORKDIR /app
 
 # 复制package.json和package-lock.json（如果存在）
 COPY package*.json ./
+COPY index.js ./
 
 # 安装依赖
 RUN npm install
