@@ -4,8 +4,9 @@ FROM node:18-alpine
 # 设置工作目录
 WORKDIR /app
 
-# 创建非root用户
-RUN addgroup -S appgroup -g 10014 && adduser -S appuser -u 10014 -G appgroup
+# 创建非root用户，确保ID在10000-20000范围内
+RUN addgroup -S appgroup -g 10014 && \
+    adduser -S appuser -u 10014 -G appgroup
 
 # 复制package.json并安装依赖
 COPY package*.json ./
@@ -15,10 +16,8 @@ RUN npm install --omit=dev
 COPY . .
 
 # 设置权限
-RUN chown -R appuser:appgroup /app && chmod -R 755 /app
-
-# 添加调试命令 - 列出文件内容
-RUN ls -la /app && whoami
+RUN chown -R appuser:appgroup /app && \
+    chmod -R 755 /app
 
 # 暴露端口
 EXPOSE 8080
@@ -28,8 +27,8 @@ ENV TARGET_HOST=xxx-xxx.hf.space
 ENV PORT=8080
 ENV NODE_ENV=production
 
-# 切换用户
-USER appuser
+# 明确切换到非root用户，ID在10000-20000范围内
+USER 10014
 
-# 启动应用，添加错误处理
-CMD ["sh", "-c", "node index.js || echo 'Container failed to start'"]
+# 启动应用
+CMD ["node", "index.js"]
