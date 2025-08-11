@@ -2,8 +2,6 @@ const http = require('http');
 const https = require('https');
 const { parse } = require('url');
 const zlib = require('zlib');
-const WebSocket = require('ws');
-const { pipeline, Transform } = require('stream');
 
 // 配置
 const DEFAULT_PORT = process.env.PORT || 8080;
@@ -26,318 +24,240 @@ function getDefaultUserAgent(isMobile = false) {
 // 转换请求头
 function transformHeaders(headers) {
   const isMobile = headers['sec-ch-ua-mobile'] === '?1';
-  const newHeaders = { ...headers };
+  const newHeaders = {};
+  
+  // 复制所有头部，但排除一些可能导致问题的
+  for (const [key, value] of Object.entries(headers)) {
+    if (!['connection', 'upgrade', 'host', 'origin'].includes(key.toLowerCase())) {
+      newHeaders[key] = value;
+    }
+  }
   
   // 设置必要的头部
   newHeaders['User-Agent'] = getDefaultUserAgent(isMobile);
   newHeaders['Host'] = TARGET_HOST;
   newHeaders['Origin'] = `https://${TARGET_HOST}`;
   
-  // 删除可能导致问题的头部
-  delete newHeaders['connection'];
-  delete newHeaders['upgrade'];
-  
   return newHeaders;
-}
-
-// 检查是否为流式响应（SSE）
-function isStreamingResponse(headers) {
-  const contentType = headers['content-type'] || '';
-  return contentType.includes('text/event-stream') || 
-         contentType.includes('text/plain') ||
-         contentType.includes('application/json');
-}
-
-// 创建流式数据处理器
-function createStreamProcessor() {
-  return new Transform({
-    transform(chunk, encoding, callback) {
-      try {
-        // 直接传递原始数据，不进行 JSON 解析
-        callback(null, chunk);
-      } catch (error) {
-        log(`Stream processing error: ${error.message}`);
-        callback(null, chunk); // 即使出错也传递原始数据
-      }
-    }
-  });
-}
-
-// 处理 WebSocket 连接
-function handleWebSocket(req, socket, head) {
-  const url = parse(req.url);
-  const targetUrl = `wss://${TARGET_HOST}${url.pathname || ''}${url.search || ''}`;
-  
-  log(`Establishing WebSocket connection to: ${targetUrl}`);
-
-  const wss = new WebSocket.Server({ noServer: true });
-  
-  wss.handleUpgrade(req, socket, head, (ws) => {
-    try {
-      const serverSocket = new WebSocket(targetUrl);
-      
-      // 客户端到服务器
-      ws.on('message', (data) => {
-        if (serverSocket.readyState === WebSocket.OPEN) {
-          serverSocket.send(data);
-        }
-      });
-      
-      // 服务器到客户端
-      serverSocket.on('message', (data) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(data);
-        }
-      });
-      
-      // 错误处理
-      ws.on('error', (error) => {
-        log(`Client WebSocket error: ${error.message}`);
-        if (serverSocket.readyState === WebSocket.OPEN) {
-          serverSocket.close();
-        }
-      });
-      
-      serverSocket.on('error', (error) => {
-        log(`Server WebSocket error: ${error.message}`);
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.close();
-        }
-      });
-      
-      // 连接关闭处理
-      ws.on('close', () => {
-        if (serverSocket.readyState === WebSocket.OPEN) {
-          serverSocket.close();
-        }
-      });
-      
-      serverSocket.on('close', () => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.close();
-        }
-      });
-      
-    } catch (error) {
-      log(`WebSocket connection error: ${error.message}`);
-      socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n');
-      socket.destroy();
-    }
-  });
-}
-
-// 处理数据压缩解压和流式传输
-function handleResponse(response, targetResponse) {
-  const encoding = targetResponse.headers['content-encoding'];
-  const isStreaming = isStreamingResponse(targetResponse.headers);
-  
-  log(`Response encoding: ${encoding || 'none'}, streaming: ${isStreaming}`);
-  
-  let processStream;
-  
-  // 解压缩处理
-  if (encoding === 'gzip') {
-    processStream = targetResponse.pipe(zlib.createGunzip());
-  } else if (encoding === 'deflate') {
-    processStream = targetResponse.pipe(zlib.createInflate());
-  } else if (encoding === 'br') {
-    processStream = targetResponse.pipe(zlib.createBrotliDecompress());
-  } else {
-    processStream = targetResponse;
-  }
-  
-  // 如果是流式响应，添加流处理器
-  if (isStreaming) {
-    processStream = processStream.pipe(createStreamProcessor());
-  }
-  
-  // 流式传输到响应
-  pipeline(processStream, response, (err) => {
-    if (err && err.code !== 'EPIPE' && err.code !== 'ECONNRESET') {
-      log(`Response pipeline error: ${err.message}`);
-    }
-  });
 }
 
 // 处理 HTTP 请求
 function handleRequest(req, res) {
+  // 设置基本的 CORS 头部
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+
+  // 处理 OPTIONS 预检请求
+  if (req.method === 'OPTIONS') {
+    res.writeHead(200);
+    res.end();
+    return;
+  }
+
   try {
     const url = parse(req.url);
-    const targetUrl = `https://${TARGET_HOST}${url.pathname || ''}${url.search || ''}`;
+    const targetPath = `${url.pathname || ''}${url.search || ''}`;
     
-    log(`Proxying HTTP request: ${req.method} ${targetUrl}`);
+    log(`${req.method} ${targetPath}`);
     
     // 构建代理请求选项
     const options = {
       hostname: TARGET_HOST,
       port: 443,
-      path: `${url.pathname || ''}${url.search || ''}`,
+      path: targetPath,
       method: req.method,
-      headers: transformHeaders(req.headers)
+      headers: transformHeaders(req.headers),
+      timeout: 30000
     };
     
-    // 发起 HTTPS 请求
+    // 创建 HTTPS 请求
     const proxyReq = https.request(options, (targetResponse) => {
-      // 设置响应头
-      const responseHeaders = { ...targetResponse.headers };
+      const { statusCode, headers } = targetResponse;
+      
+      log(`Response: ${statusCode} ${headers['content-type'] || 'unknown'}`);
+      
+      // 复制响应头，但处理压缩相关的头部
+      const responseHeaders = {};
+      for (const [key, value] of Object.entries(headers)) {
+        // 跳过可能导致问题的头部
+        if (!['content-encoding', 'content-length', 'transfer-encoding'].includes(key.toLowerCase())) {
+          responseHeaders[key] = value;
+        }
+      }
+      
+      // 添加 CORS 头部
       responseHeaders['Access-Control-Allow-Origin'] = '*';
       responseHeaders['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS';
       responseHeaders['Access-Control-Allow-Headers'] = '*';
-      responseHeaders['Access-Control-Allow-Credentials'] = 'true';
       
-      // 移除可能导致问题的压缩头部（让浏览器自行处理）
-      delete responseHeaders['content-encoding'];
-      delete responseHeaders['content-length']; // 流式响应时长度可能变化
+      // 写入响应状态和头部
+      res.writeHead(statusCode, responseHeaders);
       
-      // 处理 CORS 预检请求
-      if (req.method === 'OPTIONS') {
-        res.writeHead(200, responseHeaders);
-        res.end();
-        return;
+      // 处理响应体
+      let responseStream = targetResponse;
+      const encoding = headers['content-encoding'];
+      
+      // 处理压缩
+      try {
+        if (encoding === 'gzip') {
+          responseStream = targetResponse.pipe(zlib.createGunzip());
+        } else if (encoding === 'deflate') {
+          responseStream = targetResponse.pipe(zlib.createInflate());
+        } else if (encoding === 'br') {
+          responseStream = targetResponse.pipe(zlib.createBrotliDecompress());
+        }
+      } catch (compressionError) {
+        log(`Compression handling error: ${compressionError.message}`);
+        responseStream = targetResponse; // 回退到原始流
       }
       
-      // 处理 304 Not Modified 响应
-      if (targetResponse.statusCode === 304) {
-        res.writeHead(200, responseHeaders);
-        res.end();
-        return;
-      }
+      // 流式传输响应
+      responseStream.on('data', (chunk) => {
+        try {
+          res.write(chunk);
+        } catch (writeError) {
+          log(`Write error: ${writeError.message}`);
+        }
+      });
       
-      log(`Response status: ${targetResponse.statusCode}, content-type: ${targetResponse.headers['content-type']}`);
+      responseStream.on('end', () => {
+        try {
+          res.end();
+        } catch (endError) {
+          log(`End error: ${endError.message}`);
+        }
+      });
       
-      res.writeHead(targetResponse.statusCode, responseHeaders);
-      
-      // 处理响应数据
-      handleResponse(res, targetResponse);
+      responseStream.on('error', (streamError) => {
+        log(`Response stream error: ${streamError.message}`);
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Stream processing error' }));
+        }
+      });
     });
     
-    // 错误处理
+    // 请求错误处理
     proxyReq.on('error', (error) => {
-      log(`Proxy request error: ${error.message}`);
+      log(`Request error: ${error.message}`);
       if (!res.headersSent) {
         res.writeHead(500, { 
           'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': '*'
         });
-        res.end(JSON.stringify({ error: `Proxy Error: ${error.message}` }));
+        res.end(JSON.stringify({ error: `Proxy error: ${error.message}` }));
       }
     });
     
     // 请求超时处理
-    proxyReq.setTimeout(60000, () => {
-      log('Proxy request timeout');
+    proxyReq.on('timeout', () => {
+      log('Request timeout');
       proxyReq.destroy();
       if (!res.headersSent) {
         res.writeHead(504, { 
           'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': '*'
         });
-        res.end(JSON.stringify({ error: 'Gateway Timeout' }));
+        res.end(JSON.stringify({ error: 'Request timeout' }));
       }
     });
     
-    // 流式传输请求体
+    // 处理请求体
     if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS') {
-      pipeline(req, proxyReq, (err) => {
-        if (err && err.code !== 'EPIPE') {
-          log(`Request body pipeline error: ${err.message}`);
-        }
+      req.on('data', (chunk) => {
+        proxyReq.write(chunk);
+      });
+      
+      req.on('end', () => {
+        proxyReq.end();
+      });
+      
+      req.on('error', (reqError) => {
+        log(`Request body error: ${reqError.message}`);
+        proxyReq.destroy();
       });
     } else {
       proxyReq.end();
     }
     
   } catch (error) {
-    log(`Request handling error: ${error.message}`);
+    log(`Handler error: ${error.message}`);
     if (!res.headersSent) {
       res.writeHead(500, { 
         'Content-Type': 'application/json',
         'Access-Control-Allow-Origin': '*'
       });
-      res.end(JSON.stringify({ error: `Error: ${error.message}` }));
+      res.end(JSON.stringify({ error: `Server error: ${error.message}` }));
     }
   }
 }
 
 // 启动服务器
 function startServer(port) {
+  log(`Starting server on port ${port}`);
+  log(`Target host: ${TARGET_HOST}`);
+  
   const server = http.createServer(handleRequest);
   
-  // 设置服务器选项
-  server.keepAliveTimeout = 65000; // 65秒
-  server.headersTimeout = 66000; // 66秒
-  
-  // WebSocket 升级处理
-  server.on('upgrade', (req, socket, head) => {
-    handleWebSocket(req, socket, head);
-  });
-  
-  // 处理未捕获的错误
+  // 服务器错误处理
   server.on('error', (error) => {
     log(`Server error: ${error.message}`);
-  });
-  
-  // 优雅关闭处理
-  const gracefulShutdown = (signal) => {
-    log(`Received ${signal}, shutting down gracefully...`);
-    server.close((err) => {
-      if (err) {
-        log(`Error during server shutdown: ${err.message}`);
-        process.exit(1);
-      }
-      log('Server closed');
-      process.exit(0);
-    });
-    
-    // 强制关闭超时
-    setTimeout(() => {
-      log('Forcing server shutdown...');
+    if (error.code === 'EADDRINUSE') {
+      log(`Port ${port} is already in use`);
       process.exit(1);
-    }, 10000);
-  };
-  
-  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-  
-  // 处理未捕获的异常
-  process.on('uncaughtException', (error) => {
-    log(`Uncaught Exception: ${error.message}`);
-    log(error.stack);
-  });
-  
-  process.on('unhandledRejection', (reason, promise) => {
-    log(`Unhandled Rejection at: ${promise}, reason: ${reason}`);
+    }
   });
   
   server.listen(port, '0.0.0.0', () => {
-    log(`Starting proxy server on port ${port}`);
-    log(`Proxying requests to: ${TARGET_HOST}`);
-    log(`Listening on http://0.0.0.0:${port}`);
+    log(`Proxy server running on http://0.0.0.0:${port}`);
+    log(`Proxying to: https://${TARGET_HOST}`);
   });
+  
+  // 优雅关闭
+  const shutdown = (signal) => {
+    log(`Received ${signal}, shutting down...`);
+    server.close(() => {
+      log('Server closed');
+      process.exit(0);
+    });
+  };
+  
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
   
   return server;
 }
 
-// 命令行参数解析
+// 解析命令行参数
 const args = process.argv.slice(2);
 let port = DEFAULT_PORT;
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--port' && args[i + 1]) {
-    port = parseInt(args[i + 1]);
+    port = parseInt(args[i + 1], 10);
     break;
   }
 }
 
-// 环境变量检查
+// 验证端口号
+if (isNaN(port) || port < 1 || port > 65535) {
+  console.error('Invalid port number');
+  process.exit(1);
+}
+
+// 环境变量提示
 if (!process.env.TARGET_HOST) {
-  log('Warning: TARGET_HOST environment variable not set, using default value');
-  log('Please set TARGET_HOST environment variable for production use');
+  log('提示: 未设置 TARGET_HOST 环境变量，使用默认值');
 }
 
 // 启动服务器
 if (require.main === module) {
-  startServer(port);
+  try {
+    startServer(port);
+  } catch (startError) {
+    log(`Failed to start server: ${startError.message}`);
+    process.exit(1);
+  }
 }
-
-module.exports = { startServer };
