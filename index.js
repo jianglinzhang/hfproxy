@@ -9,21 +9,35 @@ const PORT = process.env.PORT || 3000;
 const TARGET_URL = process.env.TARGET_URL;
 
 if (!TARGET_URL) {
-    console.error('错误：关键环境变量 TARGET_URL 未设置！');
+    console.error('【严重错误】环境变量 TARGET_URL 未设置！');
     process.exit(1);
 }
 
 // --- 2. 创建 Express 应用 ---
 const app = express();
 
+// --- 中间件：记录所有进入的请求 ---
+app.use((req, res, next) => {
+    console.log(`[DEBUG-0] 收到请求: ${req.method} ${req.url}`);
+    console.log(`[DEBUG-0] 请求头:`, JSON.stringify(req.headers, null, 2));
+    next();
+});
+
 // --- 3.【必需】添加 JSON 请求体解析器 ---
-// 这是处理 OpenWebUI 发送聊天内容（POST 请求）所必需的。
-// 它必须放在代理中间件之前。
 app.use(express.json());
 
+// --- 中间件：检查 JSON 解析后的请求体 ---
+app.use((req, res, next) => {
+    if (req.method === 'POST' || req.method === 'PUT') {
+        console.log(`[DEBUG-1] 请求体解析后:`, req.body ? JSON.stringify(req.body) : '无请求体');
+    }
+    next();
+});
+
+
 // --- 4.【必需】健康检查端点 ---
-// 为 Choreo 等云平台提供一个快速、可靠的健康检查路径。
 app.get('/health', (req, res) => {
+    console.log('[DEBUG-HEALTH] 健康检查通过');
     res.status(200).send('OK');
 });
 
@@ -32,21 +46,34 @@ const apiProxy = createProxyMiddleware({
     target: TARGET_URL,
     changeOrigin: true,
     ws: true,
-    logLevel: 'info', // 'debug' 可以看到更详细的日志
+    logLevel: 'debug', // 开启 http-proxy-middleware 自身的详细日志
 
-    // 【可选但推荐】修正 SSE 的响应头，防止意外问题
+    onProxyReq: (proxyReq, req, res) => {
+        console.log(`[DEBUG-2] 准备代理请求到: ${TARGET_URL}${req.originalUrl}`);
+        console.log(`[DEBUG-2] 代理请求头:`, JSON.stringify(proxyReq.getHeaders(), null, 2));
+        
+        // 之前版本的错误根源可能在这里，我们现在只记录，不修改请求流
+        // 如果有请求体，http-proxy-middleware 会自动处理它
+        if (req.body) {
+            console.log('[DEBUG-2] 检测到请求体，将由代理自动转发。');
+        }
+    },
+
     onProxyRes: (proxyRes, req, res) => {
+        console.log(`[DEBUG-3] 收到来自目标的响应，状态码: ${proxyRes.statusCode}`);
+        console.log(`[DEBUG-3] 目标响应头:`, JSON.stringify(proxyRes.headers, null, 2));
+        
         const originalContentType = proxyRes.headers['content-type'];
         if (originalContentType && originalContentType.includes('text/event-stream')) {
+            console.log('[DEBUG-3] 检测到 SSE 流，确保 Content-Type 正确。');
             res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
         }
     },
 
-    // 当代理本身出错时的处理
     onError: (err, req, res) => {
-        console.error('代理服务器内部错误:', err);
+        console.error('[DEBUG-ERROR] 代理发生严重错误:', err);
         if (!res.headersSent) {
-            res.status(502).send('Proxy Error'); // 502 Bad Gateway 是标准的代理错误码
+            res.status(502).send('Proxy Error: ' + err.message);
         }
     }
 });
