@@ -1,7 +1,7 @@
 {
-  "name": "hf-proxy-manual",
+  "name": "hf-proxy-definitive",
   "version": "1.0.0",
-  "description": "A manual reverse proxy for Hugging Face Space, inspired by Deno.",
+  "description": "The definitive reverse proxy for Hugging Face Space using http-proxy-middleware",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -9,6 +9,6 @@
   },
   "dependencies": {
     "express": "^4.19.2",
-    "ws": "^8.17.0" 
+    "http-proxy-middleware": "^3.0.0"
   }
 }
