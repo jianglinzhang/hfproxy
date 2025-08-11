@@ -2,6 +2,7 @@ const http = require('http');
 const https = require('https');
 const { parse } = require('url');
 const WebSocket = require('ws');
+const zlib = require('zlib');
 
 const DEFAULT_PORT = 8080;
 const TARGET_HOST = process.env.TARGET_HOST || 'xxx-xxx.hf.space';
@@ -25,6 +26,10 @@ function transformHeaders(headers) {
   newHeaders['User-Agent'] = getDefaultUserAgent(isMobile);
   newHeaders['Host'] = TARGET_HOST;
   newHeaders['Origin'] = `https://${TARGET_HOST}`;
+  
+  // 移除可能导致问题的头部
+  delete newHeaders['host'];
+  delete newHeaders['origin'];
   
   return newHeaders;
 }
@@ -89,11 +94,60 @@ function handleHttpRequest(req, res) {
     };
 
     const proxyReq = https.request(targetUrl, options, (proxyRes) => {
-      res.writeHead(proxyRes.statusCode, {
-        ...proxyRes.headers,
-        'Access-Control-Allow-Origin': '*'
-      });
-      proxyRes.pipe(res);
+      // 复制响应头，但处理压缩相关的头部
+      const responseHeaders = { ...proxyRes.headers };
+      responseHeaders['Access-Control-Allow-Origin'] = '*';
+      
+      // 检查是否有压缩
+      const encoding = proxyRes.headers['content-encoding'];
+      
+      if (encoding === 'gzip') {
+        // 如果是 gzip 压缩，先解压再发送
+        delete responseHeaders['content-encoding'];
+        delete responseHeaders['content-length'];
+        
+        res.writeHead(proxyRes.statusCode, responseHeaders);
+        
+        const gunzip = zlib.createGunzip();
+        proxyRes.pipe(gunzip).pipe(res);
+        
+        gunzip.on('error', (error) => {
+          log(`Gunzip error: ${error.message}`);
+          res.end();
+        });
+      } else if (encoding === 'deflate') {
+        // 如果是 deflate 压缩
+        delete responseHeaders['content-encoding'];
+        delete responseHeaders['content-length'];
+        
+        res.writeHead(proxyRes.statusCode, responseHeaders);
+        
+        const inflate = zlib.createInflate();
+        proxyRes.pipe(inflate).pipe(res);
+        
+        inflate.on('error', (error) => {
+          log(`Inflate error: ${error.message}`);
+          res.end();
+        });
+      } else if (encoding === 'br') {
+        // 如果是 brotli 压缩
+        delete responseHeaders['content-encoding'];
+        delete responseHeaders['content-length'];
+        
+        res.writeHead(proxyRes.statusCode, responseHeaders);
+        
+        const brotli = zlib.createBrotliDecompress();
+        proxyRes.pipe(brotli).pipe(res);
+        
+        brotli.on('error', (error) => {
+          log(`Brotli error: ${error.message}`);
+          res.end();
+        });
+      } else {
+        // 没有压缩，直接转发
+        res.writeHead(proxyRes.statusCode, responseHeaders);
+        proxyRes.pipe(res);
+      }
     });
 
     proxyReq.on('error', (error) => {
