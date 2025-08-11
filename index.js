@@ -1,8 +1,7 @@
-const http = require('http');
-const https = require('https');
-const { parse } = require('url');
-const WebSocket = require('ws');
-const zlib = require('zlib');
+import http from 'http';
+import { parse } from 'url';
+import fetch from 'node-fetch';
+import WebSocket, { WebSocketServer } from 'ws';
 
 const DEFAULT_PORT = 8080;
 const TARGET_HOST = process.env.TARGET_HOST || 'xxx-xxx.hf.space';
@@ -21,15 +20,18 @@ function getDefaultUserAgent(isMobile = false) {
 
 function transformHeaders(headers) {
   const isMobile = headers['sec-ch-ua-mobile'] === '?1';
-  const newHeaders = { ...headers };
+  const newHeaders = {};
+  
+  // 复制原始头部
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() !== 'host' && key.toLowerCase() !== 'origin') {
+      newHeaders[key] = value;
+    }
+  }
   
   newHeaders['User-Agent'] = getDefaultUserAgent(isMobile);
   newHeaders['Host'] = TARGET_HOST;
   newHeaders['Origin'] = `https://${TARGET_HOST}`;
-  
-  // 移除可能导致问题的头部
-  delete newHeaders['host'];
-  delete newHeaders['origin'];
   
   return newHeaders;
 }
@@ -82,81 +84,41 @@ function handleWebSocket(req, socket, head, wss) {
   });
 }
 
-function handleHttpRequest(req, res) {
+async function handleHttpRequest(req, res) {
   try {
     const url = parse(req.url);
     const targetUrl = `https://${TARGET_HOST}${url.pathname || ''}${url.search || ''}`;
     log(`Proxying HTTP request: ${targetUrl}`);
 
-    const options = {
+    // 收集请求体
+    let body = null;
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      const chunks = [];
+      for await (const chunk of req) {
+        chunks.push(chunk);
+      }
+      body = Buffer.concat(chunks);
+    }
+
+    const response = await fetch(targetUrl, {
       method: req.method,
       headers: transformHeaders(req.headers),
-    };
-
-    const proxyReq = https.request(targetUrl, options, (proxyRes) => {
-      // 复制响应头，但处理压缩相关的头部
-      const responseHeaders = { ...proxyRes.headers };
-      responseHeaders['Access-Control-Allow-Origin'] = '*';
-      
-      // 检查是否有压缩
-      const encoding = proxyRes.headers['content-encoding'];
-      
-      if (encoding === 'gzip') {
-        // 如果是 gzip 压缩，先解压再发送
-        delete responseHeaders['content-encoding'];
-        delete responseHeaders['content-length'];
-        
-        res.writeHead(proxyRes.statusCode, responseHeaders);
-        
-        const gunzip = zlib.createGunzip();
-        proxyRes.pipe(gunzip).pipe(res);
-        
-        gunzip.on('error', (error) => {
-          log(`Gunzip error: ${error.message}`);
-          res.end();
-        });
-      } else if (encoding === 'deflate') {
-        // 如果是 deflate 压缩
-        delete responseHeaders['content-encoding'];
-        delete responseHeaders['content-length'];
-        
-        res.writeHead(proxyRes.statusCode, responseHeaders);
-        
-        const inflate = zlib.createInflate();
-        proxyRes.pipe(inflate).pipe(res);
-        
-        inflate.on('error', (error) => {
-          log(`Inflate error: ${error.message}`);
-          res.end();
-        });
-      } else if (encoding === 'br') {
-        // 如果是 brotli 压缩
-        delete responseHeaders['content-encoding'];
-        delete responseHeaders['content-length'];
-        
-        res.writeHead(proxyRes.statusCode, responseHeaders);
-        
-        const brotli = zlib.createBrotliDecompress();
-        proxyRes.pipe(brotli).pipe(res);
-        
-        brotli.on('error', (error) => {
-          log(`Brotli error: ${error.message}`);
-          res.end();
-        });
-      } else {
-        // 没有压缩，直接转发
-        res.writeHead(proxyRes.statusCode, responseHeaders);
-        proxyRes.pipe(res);
-      }
+      body: body,
+      redirect: 'follow'
     });
 
-    proxyReq.on('error', (error) => {
-      log(`Error: ${error.message}`);
-      res.writeHead(500);
-      res.end(`Proxy Error: ${error.message}`);
+    // 设置响应头
+    const responseHeaders = {};
+    response.headers.forEach((value, key) => {
+      responseHeaders[key] = value;
     });
+    responseHeaders['Access-Control-Allow-Origin'] = '*';
 
-    req.pipe(proxyReq);
+    res.writeHead(response.status, responseHeaders);
+
+    // node-fetch 自动处理压缩内容，直接获取响应体
+    const responseBuffer = await response.buffer();
+    res.end(responseBuffer);
 
   } catch (error) {
     log(`Error: ${error.message}`);
@@ -169,7 +131,7 @@ function startServer(port) {
   log(`Starting proxy server on port ${port}`);
   
   const server = http.createServer(handleHttpRequest);
-  const wss = new WebSocket.Server({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true });
 
   server.on('upgrade', (req, socket, head) => {
     handleWebSocket(req, socket, head, wss);
