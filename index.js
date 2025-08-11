@@ -181,7 +181,7 @@ function startServer(port) {
   if (!TARGET_HOST) {
     console.error('FATAL: TARGET_HOST environment variable is not set.');
     console.error('Please run the server like this:');
-    console.error('TARGET_HOST=xxx-xxx.hf.space node server.js');
+    console.error('TARGET_HOST=xxx-xxx.hf.space node index.js');
     process.exit(1); // 退出程序
   }
 
