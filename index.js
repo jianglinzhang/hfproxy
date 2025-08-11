@@ -1,10 +1,7 @@
-// index.js (Final Version v2 - Correct Stream Handling)
+// index.js (Definitive Solution)
 
 import express from 'express';
-import http from 'http';
-import { WebSocketServer, WebSocket } from 'ws';
-// 关键: 导入 Readable 用于流类型转换
-import { Readable } from 'stream';
+import { createProxyMiddleware } from 'http-proxy-middleware';
 
 // 从环境变量读取配置
 const PORT = process.env.PORT || 8080;
@@ -15,110 +12,69 @@ if (!TARGET_HOST) {
   process.exit(1);
 }
 
+const target = `https://${TARGET_HOST}`;
 const app = express();
-const server = http.createServer(app);
 
 function log(message) {
   console.log(`[${new Date().toISOString()}] ${message}`);
 }
 
-function getDefaultUserAgent(headers) {
-  const isMobile = headers['sec-ch-ua-mobile'] === '?1';
-  if (isMobile) {
-    return "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
-  } else {
-    return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-  }
-}
-
-// HTTP 请求处理
-app.use(async (req, res) => {
-  const url = new URL(req.url, `https://${req.headers.host}`);
-  const targetUrl = `https://${TARGET_HOST}${url.pathname}${url.search}`;
+const proxy = createProxyMiddleware({
+  target: target,
+  changeOrigin: true, // 必须，自动处理 Host, Origin, Referer 头
+  ws: true,           // 必须，启用 WebSocket 代理
   
-  log(`Proxying HTTP request to: ${targetUrl}`);
+  // 核心配置：我们自己处理响应流
+  selfHandleResponse: true, 
 
-  const requestHeaders = new Headers();
-  for (const [key, value] of Object.entries(req.headers)) {
-      if (key.toLowerCase() !== 'host') {
-          requestHeaders.set(key, value);
-      }
-  }
-  requestHeaders.set('User-Agent', getDefaultUserAgent(req.headers));
-  requestHeaders.set('Host', TARGET_HOST);
-  requestHeaders.set('Origin', `https://${TARGET_HOST}`);
+  on: {
+    // 请求转发前的回调，可以用来修改请求头
+    proxyReq: (proxyReq, req, res) => {
+        const isMobile = req.headers['sec-ch-ua-mobile'] === '?1';
+        const userAgent = isMobile 
+            ? "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+            : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+        
+        proxyReq.setHeader('User-Agent', userAgent);
+        log(`Proxying ${req.method} ${req.path} to ${target}`);
+    },
 
-  try {
-    const proxyResponse = await fetch(targetUrl, {
-      method: req.method,
-      headers: requestHeaders,
-      body: req.method !== 'GET' && req.method !== 'HEAD' ? req : null,
-      redirect: 'follow',
-      duplex: 'half'
-    });
+    // 关键：当代理收到目标服务器的响应时
+    proxyRes: (proxyRes, req, res) => {
+        // proxyRes 是来自目标服务器的原始响应 (Node.js IncomingMessage stream)
+        // res 是我们给客户端的响应 (Node.js ServerResponse)
 
-    const responseHeaders = {};
-    proxyResponse.headers.forEach((value, key) => {
-      // 解决某些 huggingface space 会强制返回 gzip 的问题，让其自然传输
-      if (key.toLowerCase() !== 'content-encoding') {
-        responseHeaders[key] = value;
-      }
-    });
-    responseHeaders['Access-Control-Allow-Origin'] = '*';
-    // 强制禁用所有代理和浏览器的缓冲，对SSE至关重要
-    responseHeaders['Cache-Control'] = 'no-cache, no-transform';
-    responseHeaders['X-Accel-Buffering'] = 'no';
-    
-    res.writeHead(proxyResponse.status, responseHeaders);
-
-    // *** 核心修正 ***
-    // 将 Web-standard ReadableStream 转换为 Node.js Readable stream
-    // 然后再 pipe 到 express 的 response 对象
-    if (proxyResponse.body) {
-      const nodeStream = Readable.fromWeb(proxyResponse.body);
-      nodeStream.pipe(res);
-    } else {
-      res.end();
-    }
-
-  } catch (error) {
-    log(`HTTP Proxy Error: ${error.message}`);
-    // 只有在还没有发送任何内容给客户端时才发送错误
-    if (!res.headersSent) {
-      res.status(502).send(`Proxy Error: ${error.message}`);
-    }
-  }
-});
-
-// WebSocket 请求处理 (这部分逻辑是正确的，无需修改)
-server.on('upgrade', (req, clientSocket, head) => {
-    const url = new URL(req.url, `https://${req.headers.host}`);
-    const targetUrl = `wss://${TARGET_HOST}${url.pathname}${url.search}`;
-    log(`Establishing WebSocket connection to: ${targetUrl}`);
-    const serverSocket = new WebSocket(targetUrl, {
-        headers: { ...req.headers, 'Host': TARGET_HOST, 'Origin': `https://${TARGET_HOST}` }
-    });
-    serverSocket.on('open', () => {
-        log('Server WebSocket connection opened.');
-        const wss = new WebSocketServer({ noServer: true });
-        wss.handleUpgrade(req, clientSocket, head, (ws) => {
-            log('Client WebSocket connection established.');
-            ws.on('message', (message) => serverSocket.readyState === WebSocket.OPEN && serverSocket.send(message));
-            serverSocket.on('message', (message) => ws.readyState === WebSocket.OPEN && ws.send(message));
-            ws.on('close', () => { log('Client WebSocket closed.'); serverSocket.readyState === WebSocket.OPEN && serverSocket.close(); });
-            serverSocket.on('close', () => { log('Server WebSocket closed.'); ws.readyState === WebSocket.OPEN && ws.close(); });
-            ws.on('error', (err) => log(`Client WebSocket error: ${err.message}`));
-            serverSocket.on('error', (err) => log(`Server WebSocket error: ${err.message}`));
+        // 1. 将目标服务器的所有头信息原封不动地复制到我们的响应中
+        Object.keys(proxyRes.headers).forEach((key) => {
+            res.setHeader(key, proxyRes.headers[key]);
         });
-    });
-    serverSocket.on('error', (err) => {
-        log(`Failed to connect to target WebSocket: ${err.message}`);
-        clientSocket.destroy();
-    });
+        
+        // 2. 添加/覆盖我们自己的头信息
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('X-Accel-Buffering', 'no'); // 再次强调不要缓冲
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+
+        // 3. 将目标服务器的状态码原封不动地设置到我们的响应中
+        res.writeHead(proxyRes.statusCode);
+        
+        // 4. 将目标服务器的响应体（原始流）直接 pipe 到我们的响应中
+        // 这就是解决所有问题的关键一步，它保证了SSE流的完整性
+        proxyRes.pipe(res);
+    },
+
+    error: (err, req, res) => {
+      log(`Proxy Error: ${err.message}`);
+      if (!res.headersSent) {
+        res.writeHead(502, { 'Content-Type': 'text/plain' });
+      }
+      res.end(`Proxy error: ${err.message}`);
+    }
+  }
 });
 
-// 启动服务器
-server.listen(PORT, () => {
-  log(`Manual proxy server started on port ${PORT}`);
-  log(`Proxying all requests to ${TARGET_HOST}`);
+app.use(proxy);
+
+app.listen(PORT, () => {
+  log(`Proxy server started on port ${PORT}`);
+  log(`Proxying requests to ${target}`);
 });
