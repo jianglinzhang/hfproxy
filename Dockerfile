@@ -1,4 +1,4 @@
-FROM node:18-alpine
+FROM node:22-alpine
 
 WORKDIR /app
 
@@ -19,4 +19,4 @@ ENV TARGET_HOST=xxx-xxx.hf.space
 ENV PORT=8080
 USER 10014
 # 启动应用程序
-CMD ["node", "proxy.js"]
+CMD ["node", "index.js"]
