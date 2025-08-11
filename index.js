@@ -1,7 +1,9 @@
-// index.js (v2 - Optimized for SSE Streaming)
+// index.js (Final Version - Manual Implementation)
 
 import express from 'express';
-import { createProxyMiddleware } from 'http-proxy-middleware';
+import http from 'http';
+import { WebSocketServer } from 'ws';
+import WebSocket from 'ws';
 
 // 从环境变量读取配置
 const PORT = process.env.PORT || 8080;
@@ -12,74 +14,133 @@ if (!TARGET_HOST) {
   process.exit(1);
 }
 
-const target = `https://${TARGET_HOST}`;
 const app = express();
+const server = http.createServer(app);
 
 function log(message) {
   console.log(`[${new Date().toISOString()}] ${message}`);
 }
 
-const proxyOptions = {
-  target: target,
-  changeOrigin: true, // 自动重写 Host 和 Origin 头，对于HF Space很重要
-  ws: true,           // 保持 WebSocket 支持
-  
-  // --- 新增和优化的部分 ---
-  
-  // 1. 增加超时时间，防止AI思考时连接被代理切断
-  timeout: 600000, // 10分钟超时
-  proxyTimeout: 600000, // 同上
+function getDefaultUserAgent(headers) {
+  const isMobile = headers['sec-ch-ua-mobile'] === '?1';
+  if (isMobile) {
+    return "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
+  } else {
+    return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+  }
+}
 
-  on: {
-    // 修改请求头，与你Deno版本逻辑保持一致
-    proxyReq: (proxyReq, req, res) => {
-        const isMobile = req.headers['sec-ch-ua-mobile'] === '?1';
-        const userAgent = isMobile 
-            ? "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-            : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-        
-        proxyReq.setHeader('User-Agent', userAgent);
-        log(`Proxying ${req.method} ${req.path} to ${target}`);
-    },
+// 1. HTTP 请求处理 (完全复刻 Deno 的 fetch -> pipe 逻辑)
+app.use(async (req, res) => {
+  const url = new URL(req.url, `https://${req.headers.host}`);
+  const targetUrl = `https://${TARGET_HOST}${url.pathname}${url.search}`;
+  
+  log(`Proxying HTTP request to: ${targetUrl}`);
 
-    // 2. 关键：处理代理的响应头，确保流式传输的头信息被正确传回客户端
-    proxyRes: (proxyRes, req, res) => {
-      // 允许跨域
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      
-      // HF Space的流式响应会返回 'text/event-stream'
-      // 我们必须确保这个头被原样传递给浏览器，否则浏览器不会把它当作SSE流处理
-      const contentType = proxyRes.headers['content-type'];
-      if (contentType && contentType.includes('text/event-stream')) {
-        log('SSE stream detected. Ensuring no-cache headers.');
-        // 对于SSE流，禁用任何形式的缓存
-        res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-        res.setHeader('Cache-Control', 'no-cache, no-transform');
-        res.setHeader('Connection', 'keep-alive');
-        // 'X-Accel-Buffering' 是给Nginx等反向代理看的，告诉它不要缓冲响应体
-        res.setHeader('X-Accel-Buffering', 'no');
+  // 构造请求头
+  const requestHeaders = new Headers();
+  for (const [key, value] of Object.entries(req.headers)) {
+      if (key.toLowerCase() !== 'host') { // 排除旧的 host
+          requestHeaders.set(key, value);
       }
-    },
+  }
+  requestHeaders.set('User-Agent', getDefaultUserAgent(req.headers));
+  requestHeaders.set('Host', TARGET_HOST);
+  requestHeaders.set('Origin', `https://${TARGET_HOST}`);
 
-    error: (err, req, res) => {
-        log(`Proxy Error: ${err.message}`);
-        if (!res.headersSent) {
-            res.writeHead(500, {
-                'Content-Type': 'application/json'
-            });
-        }
-        res.end(JSON.stringify({ message: 'Proxy Error', error: err.message }));
+  try {
+    const proxyResponse = await fetch(targetUrl, {
+      method: req.method,
+      headers: requestHeaders,
+      body: req.method !== 'GET' && req.method !== 'HEAD' ? req : null, // 将请求体流式传输
+      redirect: 'follow',
+      duplex: 'half' // 关键: 允许在请求中传递流
+    });
+
+    // 构造响应头
+    const responseHeaders = {};
+    proxyResponse.headers.forEach((value, key) => {
+      responseHeaders[key] = value;
+    });
+    responseHeaders['Access-Control-Allow-Origin'] = '*';
+    
+    // 将目标服务器的响应头和状态码写入我们的响应中
+    res.writeHead(proxyResponse.status, responseHeaders);
+
+    // 核心: 将目标服务器的响应体（ReadableStream）直接 pipe 到我们的响应中
+    // 这保证了数据流不被修改或缓冲，完美支持 SSE
+    proxyResponse.body.pipe(res);
+
+  } catch (error) {
+    log(`HTTP Proxy Error: ${error.message}`);
+    res.status(502).send(`Proxy Error: ${error.message}`);
+  }
+});
+
+// 2. WebSocket 请求处理 (完全复刻 Deno 的双向管道逻辑)
+server.on('upgrade', (req, clientSocket, head) => {
+  const url = new URL(req.url, `https://${req.headers.host}`);
+  const targetUrl = `wss://${TARGET_HOST}${url.pathname}${url.search}`;
+  
+  log(`Establishing WebSocket connection to: ${targetUrl}`);
+
+  // 创建一个连接到目标服务器的 WebSocket 客户端
+  const serverSocket = new WebSocket(targetUrl, {
+    // 传递原始请求的头信息
+    headers: {
+      ...req.headers,
+      'Host': TARGET_HOST,
+      'Origin': `https://${TARGET_HOST}`
     }
-  },
-};
+  });
 
-// 创建代理
-const proxy = createProxyMiddleware(proxyOptions);
+  // 当与目标服务器的连接建立后
+  serverSocket.on('open', () => {
+    log('Server WebSocket connection opened.');
+    // Node.js的`ws`库需要手动处理底层的socket升级
+    // 这里我们直接用一个虚拟的WebSocketServer来处理握手
+    const wss = new WebSocketServer({ noServer: true });
+    wss.handleUpgrade(req, clientSocket, head, (ws) => {
+      log('Client WebSocket connection established.');
 
-// 将所有请求都应用代理
-app.use('/', proxy);
+      // 将客户端消息转发给服务器
+      ws.on('message', (message) => {
+        if (serverSocket.readyState === WebSocket.OPEN) {
+          serverSocket.send(message);
+        }
+      });
+      
+      // 将服务器消息转发给客户端
+      serverSocket.on('message', (message) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(message);
+        }
+      });
+      
+      ws.on('close', () => {
+        log('Client WebSocket closed.');
+        if (serverSocket.readyState === WebSocket.OPEN) serverSocket.close();
+      });
+      
+      serverSocket.on('close', () => {
+        log('Server WebSocket closed.');
+        if (ws.readyState === WebSocket.OPEN) ws.close();
+      });
+      
+      ws.on('error', (err) => log(`Client WebSocket error: ${err.message}`));
+      serverSocket.on('error', (err) => log(`Server WebSocket error: ${err.message}`));
+    });
+  });
 
-app.listen(PORT, () => {
-  log(`Proxy server started on port ${PORT}`);
-  log(`Proxying requests to ${target}`);
+  serverSocket.on('error', (err) => {
+    log(`Failed to connect to target WebSocket: ${err.message}`);
+    clientSocket.destroy();
+  });
+});
+
+
+// 启动服务器
+server.listen(PORT, () => {
+  log(`Manual proxy server started on port ${PORT}`);
+  log(`Proxying all requests to ${TARGET_HOST}`);
 });
