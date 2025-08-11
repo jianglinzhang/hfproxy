@@ -1,15 +1,28 @@
 {
-  "name": "hf-proxy",
+  "name": "proxy-server",
   "version": "1.0.0",
-  "description": "A proxy server for accessing Hugging Face spaces",
-  "main": "index.js",
+  "description": "A proxy server for accessing Hugging Face spaces with compression and streaming support",
+  "main": "server.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "node index.js --port 8080"
+    "start": "node server.js",
+    "dev": "nodemon server.js"
   },
   "dependencies": {
-    "node-fetch": "^3.3.2",
     "ws": "^8.14.2"
   },
-  "type": "module"
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "keywords": [
+    "proxy",
+    "server",
+    "huggingface",
+    "streaming",
+    "compression"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.0.0"
+  }
 }
