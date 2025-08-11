@@ -1,7 +1,7 @@
-import http from 'http';
-import https from 'https';
-import { parse } from 'url';
-import WebSocket from 'ws';
+const http = require('http');
+const https = require('https');
+const { parse } = require('url');
+const WebSocket = require('ws');
 
 const DEFAULT_PORT = 8080;
 const TARGET_HOST = process.env.TARGET_HOST || 'xxx-xxx.hf.space';
@@ -126,6 +126,7 @@ function startServer(port) {
   });
 }
 
+// 解析命令行参数
 const args = process.argv.slice(2);
 let port = DEFAULT_PORT;
 
