@@ -12,6 +12,12 @@ RUN npm install
 # 复制应用程序代码
 COPY . .
 
+# 调试：列出目录内容
+RUN ls -la /app
+
+# 确保文件具有正确的权限
+RUN chown -R 10014:10014 /app
+
 # 暴露端口
 EXPOSE 8080
 
