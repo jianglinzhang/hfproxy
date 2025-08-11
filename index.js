@@ -1,327 +1,57 @@
+const express = require('express');
+const { createProxyMiddleware } = require('http-proxy-middleware');
+
+// 在本地开发时，加载 .env 文件中的环境变量
 require('dotenv').config();
-const http = require('http');
-const https = require('https');
-const WebSocket = require('ws');
-const url = require('url');
-const zlib = require('zlib');
-const { StringDecoder } = require('string_decoder');
 
-// 从环境变量获取目标主机，提高安全性
-const TARGET_HOST = process.env.TARGET_HOST || 'xxx-xxx.hf.space';
-const DEFAULT_PORT = process.env.PORT || 8080;
+// --- 1. 从环境变量中读取配置 ---
+const PORT = process.env.PORT || 3000; // Choreo 会自动注入 PORT 环境变量
+const TARGET_URL = process.env.TARGET_URL;
 
-function log(message) {
-  console.log(`[${new Date().toISOString()}] ${message}`);
+// 检查关键环境变量是否设置
+if (!TARGET_URL) {
+    console.error('错误：关键环境变量 TARGET_URL 未设置！');
+    process.exit(1); // 退出程序
 }
 
-function getDefaultUserAgent(isMobile = false) {
-  if (isMobile) {
-    return "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
-  } else {
-    return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-  }
-}
+// --- 2. 创建 Express 应用 ---
+const app = express();
 
-function transformHeaders(headers) {
-  const isMobile = headers['sec-ch-ua-mobile'] === "?1";
-  const newHeaders = {};
-  
-  // 复制原始头部
-  for (const [key, value] of Object.entries(headers)) {
-    newHeaders[key] = value;
-  }
-  
-  // 更新特定头部
-  newHeaders['User-Agent'] = getDefaultUserAgent(isMobile);
-  newHeaders['Host'] = TARGET_HOST;
-  newHeaders['Origin'] = `https://${TARGET_HOST}`;
-  
-  // 删除一些可能导致问题的头部
-  delete newHeaders['content-length'];
-  
-  return newHeaders;
-}
+// --- 3. 配置代理中间件 ---
+// http-proxy-middleware 会自动处理流式响应 (SSE) 和数据压缩
+const proxyOptions = {
+    target: TARGET_URL,  // 我们的目标服务器地址
+    changeOrigin: true,  // 必须设置为 true，否则目标服务器可能因为 Host 头不匹配而拒绝请求
+    ws: true,            // 启用 WebSocket 代理，很多现代Web应用（包括OpenWebUI的某些功能）可能会用到
+    
+    // 当代理出错时，提供更友好的错误信息
+    onError: (err, req, res) => {
+        console.error('代理请求出错:', err);
+        res.writeHead(500, {
+            'Content-Type': 'text/plain; charset=utf-8'
+        });
+        res.end('代理服务器出错，无法连接到目标服务。');
+    },
 
-function handleWebSocket(req, socket, head) {
-  const parsedUrl = url.parse(req.url);
-  const targetUrl = `wss://${TARGET_HOST}${parsedUrl.pathname}${parsedUrl.search}`;
-  
-  log(`Establishing WebSocket connection to: ${targetUrl}`);
-  
-  try {
-    // 设置WebSocket客户端选项
-    const wsOptions = {
-      headers: {
-        ...transformHeaders(req.headers),
-        'Connection': 'Upgrade',
-        'Upgrade': 'websocket'
-      }
-    };
-    
-    const wss = new WebSocket(targetUrl, [], wsOptions);
-    
-    wss.on('open', () => {
-      // 发送初始握手数据
-      if (head && head.length > 0) {
-        wss.send(head, { binary: true });
-      }
-      
-      // 建立双向数据传输
-      socket.on('data', (data) => {
-        if (wss.readyState === WebSocket.OPEN) {
-          wss.send(data, { binary: data instanceof Buffer });
-        }
-      });
-      
-      wss.on('message', (data, isBinary) => {
-        if (socket.readyState === 'open') {
-          socket.write(data);
-        }
-      });
-      
-      // 处理错误
-      socket.on('error', (error) => {
-        log(`Client WebSocket error: ${error.message}`);
-      });
-      
-      wss.on('error', (error) => {
-        log(`Server WebSocket error: ${error.message}`);
-      });
-      
-      // 处理关闭
-      socket.on('close', (hadError) => {
-        log(`Client WebSocket closed, hadError: ${hadError}`);
-        if (wss.readyState === WebSocket.OPEN) {
-          wss.close();
-        }
-      });
-      
-      wss.on('close', (code, reason) => {
-        log(`Server WebSocket closed, code: ${code}, reason: ${reason}`);
-        if (socket.readyState === 'open') {
-          socket.end();
-        }
-      });
-    });
-    
-    wss.on('error', (error) => {
-      log(`WebSocket connection error: ${error.message}`);
-      socket.end(`HTTP/1.1 500 WebSocket Error: ${error.message}\r\n\r\n`);
-    });
-    
-    wss.on('unexpected-response', (request, response) => {
-      log(`WebSocket unexpected response: ${response.statusCode}`);
-      socket.end(`HTTP/1.1 ${response.statusCode} WebSocket Error\r\n\r\n`);
-    });
-  } catch (error) {
-    log(`WebSocket setup error: ${error.message}`);
-    socket.end(`HTTP/1.1 500 WebSocket Setup Error: ${error.message}\r\n\r\n`);
-  }
-}
+    // 可以在这里查看和修改从目标服务器返回的头信息，但通常不需要
+    onProxyRes: (proxyRes, req, res) => {
+        // http-proxy-middleware 会自动处理 Content-Encoding (gzip, brotli等)
+        // 它会直接将目标服务器的压缩数据流和头信息传递给客户端，由浏览器解压
+        // 这就避免了“页面乱码”问题，效率也最高。
+        console.log(`[Proxy] 收到来自 ${TARGET_URL} 的响应: ${proxyRes.statusCode}`);
+    },
 
-// 处理SSE格式数据
-function handleSSEResponse(proxyRes, res) {
-  const contentType = proxyRes.headers['content-type'] || '';
-  const isSSE = contentType.includes('text/event-stream') || 
-                contentType.includes('application/json') && 
-                proxyRes.headers['transfer-encoding'] === 'chunked';
-  
-  if (!isSSE) {
-    // 如果不是SSE格式，直接流式传输
-    proxyRes.pipe(res);
-    return;
-  }
-  
-  // 设置响应头
-  const responseHeaders = { ...proxyRes.headers };
-  responseHeaders['Access-Control-Allow-Origin'] = '*';
-  delete responseHeaders['content-length'];
-  
-  res.writeHead(proxyRes.statusCode, responseHeaders);
-  
-  const decoder = new StringDecoder('utf8');
-  let buffer = '';
-  
-  proxyRes.on('data', (chunk) => {
-    buffer += decoder.write(chunk);
-    
-    // 处理缓冲区中的完整行
-    let lines = buffer.split('\n');
-    buffer = lines.pop(); // 保留最后一个可能不完整的行
-    
-    for (const line of lines) {
-      if (line.startsWith('data: ')) {
-        try {
-          // 提取JSON部分
-          const jsonStr = line.substring(6); // 移除 "data: " 前缀
-          
-          // 如果是结束标记 "[DONE]"
-          if (jsonStr === '[DONE]') {
-            res.write(`data: [DONE]\n\n`);
-            continue;
-          }
-          
-          // 尝试解析JSON
-          const data = JSON.parse(jsonStr);
-          
-          // 重新格式化为SSE格式并转发
-          res.write(`data: ${JSON.stringify(data)}\n\n`);
-        } catch (e) {
-          // 如果JSON解析失败，直接转发原始行
-          res.write(`${line}\n`);
-        }
-      } else if (line.trim() !== '') {
-        // 转发非数据行（如事件类型等）
-        res.write(`${line}\n`);
-      }
-    }
-  });
-  
-  proxyRes.on('end', () => {
-    // 处理缓冲区中剩余的数据
-    if (buffer.trim() !== '') {
-      if (buffer.startsWith('data: ')) {
-        try {
-          const jsonStr = buffer.substring(6);
-          if (jsonStr !== '[DONE]') {
-            const data = JSON.parse(jsonStr);
-            res.write(`data: ${JSON.stringify(data)}\n\n`);
-          }
-        } catch (e) {
-          res.write(`${buffer}\n`);
-        }
-      } else {
-        res.write(`${buffer}\n`);
-      }
-    }
-    res.end();
-  });
-}
+    logLevel: 'info' // 可以设置为 'debug' 来查看更详细的日志
+};
 
-async function handleRequest(req, res) {
-  try {
-    const parsedUrl = url.parse(req.url);
-    const targetUrl = `https://${TARGET_HOST}${parsedUrl.pathname}${parsedUrl.search}`;
-    
-    log(`Proxying HTTP request: ${targetUrl}`);
-    
-    // 准备代理请求选项
-    const options = {
-      hostname: TARGET_HOST,
-      port: 443,
-      path: parsedUrl.pathname + (parsedUrl.search || ''),
-      method: req.method,
-      headers: transformHeaders(req.headers)
-    };
-    
-    // 创建代理请求
-    const proxyReq = https.request(options, (proxyRes) => {
-      // 处理压缩数据
-      const contentEncoding = proxyRes.headers['content-encoding'];
-      
-      // 设置响应头
-      const responseHeaders = { ...proxyRes.headers };
-      responseHeaders['Access-Control-Allow-Origin'] = '*';
-      
-      // 删除可能导致问题的头部
-      delete responseHeaders['content-length'];
-      
-      // 如果有压缩，删除压缩头，因为我们会在代理中解压缩
-      if (contentEncoding === 'gzip' || contentEncoding === 'deflate') {
-        delete responseHeaders['content-encoding'];
-      }
-      
-      // 检查是否是SSE响应
-      const contentType = proxyRes.headers['content-type'] || '';
-      const isSSE = contentType.includes('text/event-stream') || 
-                    contentType.includes('application/json') && 
-                    proxyRes.headers['transfer-encoding'] === 'chunked';
-      
-      res.writeHead(proxyRes.statusCode, responseHeaders);
-      
-      // 处理压缩数据，避免页面乱码和304问题
-      if (contentEncoding === 'gzip') {
-        const gunzip = zlib.createGunzip();
-        proxyRes.pipe(gunzip).pipe(res);
-      } else if (contentEncoding === 'deflate') {
-        const inflate = zlib.createInflate();
-        proxyRes.pipe(inflate).pipe(res);
-      } else if (isSSE) {
-        // 特殊处理SSE格式数据
-        handleSSEResponse(proxyRes, res);
-      } else {
-        // 流式传输响应，支持OpenWebUI
-        proxyRes.pipe(res);
-      }
-    });
-    
-    // 处理错误
-    proxyReq.on('error', (error) => {
-      log(`Proxy request error: ${error.message}`);
-      res.writeHead(500, { 'Content-Type': 'text/plain' });
-      res.end(`Proxy Error: ${error.message}`);
-    });
-    
-    // 流式传输请求体
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      req.pipe(proxyReq);
-    } else {
-      proxyReq.end();
-    }
-  } catch (error) {
-    log(`Error: ${error.message}`);
-    res.writeHead(500, { 'Content-Type': 'text/plain' });
-    res.end(`Proxy Error: ${error.message}`);
-  }
-}
+const apiProxy = createProxyMiddleware(proxyOptions);
 
-function startServer(port) {
-  log(`Starting proxy server on port ${port}`);
-  
-  const server = http.createServer((req, res) => {
-    handleRequest(req, res);
-  });
-  
-  // 处理WebSocket升级
-  server.on('upgrade', (req, socket, head) => {
-    handleWebSocket(req, socket, head);
-  });
-  
-  server.listen(port, () => {
-    log(`Listening on http://localhost:${port}`);
-  });
-}
+// --- 4. 应用代理中间件 ---
+// 将所有进入的请求 (/) 都转发到 TARGET_URL
+app.use('/', apiProxy);
 
-// 解析命令行参数
-function parseArgs() {
-  const args = process.argv.slice(2);
-  const parsedArgs = {};
-  
-  for (let i = 0; i < args.length; i++) {
-    if (args[i].startsWith('--')) {
-      const key = args[i].substring(2);
-      const nextArg = args[i + 1];
-      
-      if (nextArg && !nextArg.startsWith('--')) {
-        parsedArgs[key] = nextArg;
-        i++;
-      } else {
-        parsedArgs[key] = true;
-      }
-    }
-  }
-  
-  return parsedArgs;
-}
-
-// 主函数
-function main() {
-  const parsedArgs = parseArgs();
-  const port = parsedArgs.port ? Number(parsedArgs.port) : DEFAULT_PORT;
-  startServer(port);
-}
-
-// 运行主函数
-if (require.main === module) {
-  main();
-}
+// --- 5. 启动服务器 ---
+app.listen(PORT, () => {
+    console.log(`代理服务器已启动，正在监听端口: ${PORT}`);
+    console.log(`将所有请求代理到: ${TARGET_URL}`);
+});
