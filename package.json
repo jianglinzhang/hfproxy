@@ -4,7 +4,8 @@
   "description": "A proxy server for accessing Hugging Face spaces",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "node index.js --port 8080"
   },
   "dependencies": {
     "node-fetch": "^3.3.2",
