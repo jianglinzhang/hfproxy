@@ -186,6 +186,12 @@ function startServer(port) {
   }
 
   const server = http.createServer((req, res) => {
+    // --- 新增的健康检查代码 ---
+    if (req.url === '/health' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('OK');
+      return;
+    }
     // 处理 OPTIONS 预检请求
     if (req.method === 'OPTIONS') {
         res.writeHead(204, {
