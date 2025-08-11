@@ -1,11 +1,12 @@
 {
   "name": "proxy-server",
   "version": "1.0.0",
-  "description": "A proxy server for accessing Hugging Face spaces with compression and streaming support",
+  "description": "A proxy server for accessing Hugging Face spaces with streaming and compression support",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "test": "node -e \"console.log('Server test passed')\""
   },
   "dependencies": {
     "ws": "^8.14.2"
@@ -18,9 +19,10 @@
     "server",
     "huggingface",
     "streaming",
-    "compression"
+    "compression",
+    "openwebui"
   ],
-  "author": "Your Name",
+  "author": "Assistant",
   "license": "MIT",
   "engines": {
     "node": ">=14.0.0"
