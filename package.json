@@ -1,11 +1,10 @@
 {
-  "name": "hf-proxy-definitive",
+  "name": "hf-proxy",
   "version": "1.0.0",
   "description": "A proxy server for accessing Hugging Face spaces",
-  "main": "index.js",
-  "type": "module",
+  "main": "proxy.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node proxy.js"
   },
   "dependencies": {
     "ws": "^8.17.0"
