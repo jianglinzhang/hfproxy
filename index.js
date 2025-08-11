@@ -1,4 +1,4 @@
-// index.js (Definitive Solution)
+// index.js (Definitive Solution v2 - With Health Check)
 
 import express from 'express';
 import { createProxyMiddleware } from 'http-proxy-middleware';
@@ -19,16 +19,28 @@ function log(message) {
   console.log(`[${new Date().toISOString()}] ${message}`);
 }
 
+// *** 关键改动：添加健康检查端点 ***
+// 这个端点必须在代理中间件之前定义，否则请求也会被代理走
+app.get('/health', (req, res) => {
+  // 返回一个简单的 200 OK 响应
+  // 这告诉 Choreo "我还活着，一切正常！"
+  res.status(200).send('OK');
+});
+
+
 const proxy = createProxyMiddleware({
+  // 我们只代理除了 /health 之外的所有请求
+  // filter 函数返回 true 的请求才会被代理
+  filter: (pathname, req) => {
+    return pathname !== '/health';
+  },
+
   target: target,
-  changeOrigin: true, // 必须，自动处理 Host, Origin, Referer 头
-  ws: true,           // 必须，启用 WebSocket 代理
-  
-  // 核心配置：我们自己处理响应流
-  selfHandleResponse: true, 
+  changeOrigin: true,
+  ws: true,
+  selfHandleResponse: true,
 
   on: {
-    // 请求转发前的回调，可以用来修改请求头
     proxyReq: (proxyReq, req, res) => {
         const isMobile = req.headers['sec-ch-ua-mobile'] === '?1';
         const userAgent = isMobile 
@@ -38,30 +50,16 @@ const proxy = createProxyMiddleware({
         proxyReq.setHeader('User-Agent', userAgent);
         log(`Proxying ${req.method} ${req.path} to ${target}`);
     },
-
-    // 关键：当代理收到目标服务器的响应时
     proxyRes: (proxyRes, req, res) => {
-        // proxyRes 是来自目标服务器的原始响应 (Node.js IncomingMessage stream)
-        // res 是我们给客户端的响应 (Node.js ServerResponse)
-
-        // 1. 将目标服务器的所有头信息原封不动地复制到我们的响应中
         Object.keys(proxyRes.headers).forEach((key) => {
             res.setHeader(key, proxyRes.headers[key]);
         });
-        
-        // 2. 添加/覆盖我们自己的头信息
         res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('X-Accel-Buffering', 'no'); // 再次强调不要缓冲
+        res.setHeader('X-Accel-Buffering', 'no');
         res.setHeader('Cache-Control', 'no-cache, no-transform');
-
-        // 3. 将目标服务器的状态码原封不动地设置到我们的响应中
         res.writeHead(proxyRes.statusCode);
-        
-        // 4. 将目标服务器的响应体（原始流）直接 pipe 到我们的响应中
-        // 这就是解决所有问题的关键一步，它保证了SSE流的完整性
         proxyRes.pipe(res);
     },
-
     error: (err, req, res) => {
       log(`Proxy Error: ${err.message}`);
       if (!res.headersSent) {
@@ -72,6 +70,7 @@ const proxy = createProxyMiddleware({
   }
 });
 
+// 将代理中间件应用到所有路径
 app.use(proxy);
 
 app.listen(PORT, () => {
