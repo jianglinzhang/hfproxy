@@ -100,14 +100,6 @@ function handleWebSocket(req, socket, head, wss) {
   }
 }
 
-// 检查是否是 SSE 流式响应
-function isSSEResponse(headers) {
-  const contentType = headers['content-type'] || '';
-  return contentType.includes('text/event-stream') || 
-         contentType.includes('text/plain') ||
-         headers['cache-control'] === 'no-cache';
-}
-
 async function handleHttpRequest(req, res) {
   try {
     const url = parse(req.url);
@@ -138,52 +130,37 @@ async function handleHttpRequest(req, res) {
       timeout: 30000,
     });
 
-    // 设置响应头
+    // 复制响应头
     const responseHeaders = {};
     response.headers.forEach((value, key) => {
       responseHeaders[key] = value;
     });
-    
-    // 添加 CORS 头
     responseHeaders['Access-Control-Allow-Origin'] = '*';
     responseHeaders['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS';
     responseHeaders['Access-Control-Allow-Headers'] = '*';
-    
-    // 如果是预检请求，直接返回
-    if (req.method === 'OPTIONS') {
-      res.writeHead(200, responseHeaders);
-      res.end();
-      return;
-    }
+
+    // 检查是否为流式响应
+    const contentType = response.headers.get('content-type') || '';
+    const isStream = contentType.includes('text/event-stream') || 
+                    contentType.includes('text/plain') ||
+                    req.url.includes('/chat') ||
+                    req.url.includes('/api');
 
     res.writeHead(response.status, responseHeaders);
 
-    // 检查是否是 SSE 流式响应
-    if (isSSEResponse(responseHeaders)) {
-      log(`Handling SSE stream for: ${targetUrl}`);
+    if (isStream) {
+      // 对于流式响应，直接管道传输，不做任何处理
+      log(`Streaming response for: ${req.url}`);
+      response.body.pipe(res, { end: true });
       
-      // 对于 SSE 流，直接管道传输，不做任何处理
-      if (response.body) {
-        response.body.on('error', (err) => {
-          log(`SSE stream error: ${err.message}`);
-          if (!res.destroyed) {
-            res.destroy();
-          }
-        });
-
-        res.on('close', () => {
-          log(`Client disconnected from SSE stream`);
-          if (response.body && !response.body.destroyed) {
-            response.body.destroy();
-          }
-        });
-
-        response.body.pipe(res);
-      } else {
-        res.end();
-      }
+      response.body.on('error', (error) => {
+        log(`Stream error: ${error.message}`);
+        if (!res.destroyed) {
+          res.destroy();
+        }
+      });
     } else {
-      // 普通响应处理
+      // 对于非流式响应，正常处理
       if (response.body) {
         response.body.pipe(res);
       } else {
@@ -204,10 +181,6 @@ function startServer(port) {
   log(`Starting proxy server on port ${port} for target: ${TARGET_HOST}`);
   
   const server = http.createServer((req, res) => {
-    // 设置请求超时
-    req.setTimeout(60000); // 60秒超时，适合 SSE 长连接
-    res.setTimeout(60000);
-    
     req.on('error', (err) => {
       log(`Request error: ${err.message}`);
     });
@@ -233,7 +206,6 @@ function startServer(port) {
     process.exit(1);
   });
 
-  // 优雅关闭
   process.on('SIGINT', () => {
     log('Received SIGINT, shutting down gracefully');
     server.close(() => {
@@ -258,7 +230,6 @@ function startServer(port) {
   return server;
 }
 
-// 解析命令行参数
 const args = process.argv.slice(2);
 let port = DEFAULT_PORT;
 
@@ -276,7 +247,6 @@ if (isNaN(port) || port < 1 || port > 65535) {
 
 if (!TARGET_HOST || TARGET_HOST === 'xxx-xxx.hf.space') {
   log('Warning: TARGET_HOST not set or using default placeholder');
-  log('Set TARGET_HOST environment variable to your actual Hugging Face space');
 }
 
 startServer(port);
