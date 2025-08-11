@@ -1,4 +1,4 @@
-// index.js
+// index.js (v2 - Optimized for SSE Streaming)
 
 import express from 'express';
 import { createProxyMiddleware } from 'http-proxy-middleware';
@@ -21,11 +21,17 @@ function log(message) {
 
 const proxyOptions = {
   target: target,
-  changeOrigin: true, // 关键：这会自动设置正确的 Host 和 Origin 头
-  ws: true,           // 关键：启用 WebSocket 代理
-  logLevel: 'info',
+  changeOrigin: true, // 自动重写 Host 和 Origin 头，对于HF Space很重要
+  ws: true,           // 保持 WebSocket 支持
+  
+  // --- 新增和优化的部分 ---
+  
+  // 1. 增加超时时间，防止AI思考时连接被代理切断
+  timeout: 600000, // 10分钟超时
+  proxyTimeout: 600000, // 同上
+
   on: {
-    // 我们可以用这个事件来修改请求头，模拟你原来的 transformHeaders
+    // 修改请求头，与你Deno版本逻辑保持一致
     proxyReq: (proxyReq, req, res) => {
         const isMobile = req.headers['sec-ch-ua-mobile'] === '?1';
         const userAgent = isMobile 
@@ -33,13 +39,36 @@ const proxyOptions = {
             : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
         
         proxyReq.setHeader('User-Agent', userAgent);
-        // changeOrigin:true 已经处理了 Host 和 Origin, 无需手动设置
-        // proxyReq.setHeader('Host', TARGET_HOST);
-        // proxyReq.setHeader('Origin', target);
+        log(`Proxying ${req.method} ${req.path} to ${target}`);
     },
+
+    // 2. 关键：处理代理的响应头，确保流式传输的头信息被正确传回客户端
     proxyRes: (proxyRes, req, res) => {
-        // 添加 CORS 头
-        proxyRes.headers['Access-Control-Allow-Origin'] = '*';
+      // 允许跨域
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      
+      // HF Space的流式响应会返回 'text/event-stream'
+      // 我们必须确保这个头被原样传递给浏览器，否则浏览器不会把它当作SSE流处理
+      const contentType = proxyRes.headers['content-type'];
+      if (contentType && contentType.includes('text/event-stream')) {
+        log('SSE stream detected. Ensuring no-cache headers.');
+        // 对于SSE流，禁用任何形式的缓存
+        res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        // 'X-Accel-Buffering' 是给Nginx等反向代理看的，告诉它不要缓冲响应体
+        res.setHeader('X-Accel-Buffering', 'no');
+      }
+    },
+
+    error: (err, req, res) => {
+        log(`Proxy Error: ${err.message}`);
+        if (!res.headersSent) {
+            res.writeHead(500, {
+                'Content-Type': 'application/json'
+            });
+        }
+        res.end(JSON.stringify({ message: 'Proxy Error', error: err.message }));
     }
   },
 };
