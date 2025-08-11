@@ -1,29 +1,16 @@
 {
-  "name": "proxy-server",
+  "name": "hf-space-proxy",
   "version": "1.0.0",
-  "description": "A proxy server for accessing Hugging Face spaces with compression and streaming support",
+  "description": "A proxy server for Hugging Face Spaces to be deployed on Choreo.",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+    "start": "node index.js"
   },
+  "author": "",
+  "license": "ISC",
   "dependencies": {
-    "ws": "^8.14.2",
-    "dotenv": "^16.3.1"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.1"
-  },
-  "keywords": [
-    "proxy",
-    "server",
-    "huggingface",
-    "streaming",
-    "compression"
-  ],
-  "author": "Your Name",
-  "license": "MIT",
-  "engines": {
-    "node": ">=14.0.0"
+    "dotenv": "^16.3.1",
+    "express": "^4.19.2",
+    "http-proxy-middleware": "^3.0.0"
   }
 }
