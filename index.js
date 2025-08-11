@@ -211,8 +211,8 @@ function startServer(port) {
     handleWebSocket(req, socket, head);
   });
 
-  server.listen(port, () => {
-    log(`Proxy server started on http://localhost:${port}`);
+  server.listen(port, '0.0.0.0', () => {
+    log(`Proxy server started. Listening on all interfaces at port ${port}`);
     log(`Targeting -> https://${TARGET_HOST}`);
   });
   
