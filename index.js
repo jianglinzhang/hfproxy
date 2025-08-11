@@ -4,6 +4,7 @@ const https = require('https');
 const WebSocket = require('ws');
 const url = require('url');
 const zlib = require('zlib');
+const { StringDecoder } = require('string_decoder');
 
 // 从环境变量获取目标主机，提高安全性
 const TARGET_HOST = process.env.TARGET_HOST || 'xxx-xxx.hf.space';
@@ -48,7 +49,7 @@ function handleWebSocket(req, socket, head) {
   log(`Establishing WebSocket connection to: ${targetUrl}`);
   
   try {
-    // 设置 WebSocket 客户端选项
+    // 设置WebSocket客户端选项
     const wsOptions = {
       headers: {
         ...transformHeaders(req.headers),
@@ -118,6 +119,85 @@ function handleWebSocket(req, socket, head) {
   }
 }
 
+// 处理SSE格式数据
+function handleSSEResponse(proxyRes, res) {
+  const contentType = proxyRes.headers['content-type'] || '';
+  const isSSE = contentType.includes('text/event-stream') || 
+                contentType.includes('application/json') && 
+                proxyRes.headers['transfer-encoding'] === 'chunked';
+  
+  if (!isSSE) {
+    // 如果不是SSE格式，直接流式传输
+    proxyRes.pipe(res);
+    return;
+  }
+  
+  // 设置响应头
+  const responseHeaders = { ...proxyRes.headers };
+  responseHeaders['Access-Control-Allow-Origin'] = '*';
+  delete responseHeaders['content-length'];
+  
+  res.writeHead(proxyRes.statusCode, responseHeaders);
+  
+  const decoder = new StringDecoder('utf8');
+  let buffer = '';
+  
+  proxyRes.on('data', (chunk) => {
+    buffer += decoder.write(chunk);
+    
+    // 处理缓冲区中的完整行
+    let lines = buffer.split('\n');
+    buffer = lines.pop(); // 保留最后一个可能不完整的行
+    
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        try {
+          // 提取JSON部分
+          const jsonStr = line.substring(6); // 移除 "data: " 前缀
+          
+          // 如果是结束标记 "[DONE]"
+          if (jsonStr === '[DONE]') {
+            res.write(`data: [DONE]\n\n`);
+            continue;
+          }
+          
+          // 尝试解析JSON
+          const data = JSON.parse(jsonStr);
+          
+          // 重新格式化为SSE格式并转发
+          res.write(`data: ${JSON.stringify(data)}\n\n`);
+        } catch (e) {
+          // 如果JSON解析失败，直接转发原始行
+          res.write(`${line}\n`);
+        }
+      } else if (line.trim() !== '') {
+        // 转发非数据行（如事件类型等）
+        res.write(`${line}\n`);
+      }
+    }
+  });
+  
+  proxyRes.on('end', () => {
+    // 处理缓冲区中剩余的数据
+    if (buffer.trim() !== '') {
+      if (buffer.startsWith('data: ')) {
+        try {
+          const jsonStr = buffer.substring(6);
+          if (jsonStr !== '[DONE]') {
+            const data = JSON.parse(jsonStr);
+            res.write(`data: ${JSON.stringify(data)}\n\n`);
+          }
+        } catch (e) {
+          res.write(`${buffer}\n`);
+        }
+      } else {
+        res.write(`${buffer}\n`);
+      }
+    }
+    res.end();
+  });
+}
+
 async function handleRequest(req, res) {
   try {
     const parsedUrl = url.parse(req.url);
@@ -151,6 +231,12 @@ async function handleRequest(req, res) {
         delete responseHeaders['content-encoding'];
       }
       
+      // 检查是否是SSE响应
+      const contentType = proxyRes.headers['content-type'] || '';
+      const isSSE = contentType.includes('text/event-stream') || 
+                    contentType.includes('application/json') && 
+                    proxyRes.headers['transfer-encoding'] === 'chunked';
+      
       res.writeHead(proxyRes.statusCode, responseHeaders);
       
       // 处理压缩数据，避免页面乱码和304问题
@@ -160,6 +246,9 @@ async function handleRequest(req, res) {
       } else if (contentEncoding === 'deflate') {
         const inflate = zlib.createInflate();
         proxyRes.pipe(inflate).pipe(res);
+      } else if (isSSE) {
+        // 特殊处理SSE格式数据
+        handleSSEResponse(proxyRes, res);
       } else {
         // 流式传输响应，支持OpenWebUI
         proxyRes.pipe(res);
@@ -193,7 +282,7 @@ function startServer(port) {
     handleRequest(req, res);
   });
   
-  // 处理 WebSocket 升级
+  // 处理WebSocket升级
   server.on('upgrade', (req, socket, head) => {
     handleWebSocket(req, socket, head);
   });
