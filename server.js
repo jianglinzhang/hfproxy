@@ -31,11 +31,10 @@ const server = http.createServer((req, res) => {
       ...req.headers,
       'Origin': HF_SPACE_URL,
       'Referer': HF_SPACE_URL,
-      host: targetUrl.hostname, // 覆盖原始 host 头
+      host: targetUrl.hostname,
     },
   };
 
-  // 根据目标协议选择 http 或 https
   const proxyRequest = (targetUrl.protocol === 'https:' ? https : http).request(options, (proxyRes) => {
     // 设置 CORS 头
     proxyRes.headers['Access-Control-Allow-Origin'] = '*';
@@ -52,11 +51,10 @@ const server = http.createServer((req, res) => {
     res.end('Error: ' + e.message);
   });
 
-  // 将请求体传递给代理请求
   req.pipe(proxyRequest);
 });
 
-// 创建 WebSocket 服务器（不绑定到 HTTP 服务器）
+// 创建 WebSocket 服务器
 const wss = new WebSocket.Server({ noServer: true });
 
 // 处理 HTTP 服务器的升级事件
@@ -64,11 +62,9 @@ server.on('upgrade', (req, socket, head) => {
   // 检查是否是 WebSocket 升级请求
   if (req.headers['upgrade'] === 'websocket') {
     wss.handleUpgrade(req, socket, head, (ws) => {
-      // 当 WebSocket 连接建立后，处理连接
       handleWebSocketConnection(ws, req);
     });
   } else {
-    // 如果不是 WebSocket 升级，则关闭连接
     socket.destroy();
   }
 });
@@ -79,10 +75,22 @@ function handleWebSocketConnection(ws, req) {
   // 构建目标 WebSocket URL
   const targetWsUrl = HF_SPACE_URL.replace('https://', 'wss://') + parsedUrl.path;
 
+  // 获取客户端请求中的子协议
+  const clientProtocol = req.headers['sec-websocket-protocol'];
+  const protocols = clientProtocol ? clientProtocol.split(',').map(s => s.trim()) : undefined;
+
   // 创建到目标服务器的 WebSocket 连接
-  const targetWs = new WebSocket(targetWsUrl, {
+  const targetWs = new WebSocket(targetWsUrl, protocols, {
     // 忽略证书验证（仅用于开发）
     rejectUnauthorized: false,
+    // 添加必要的头部
+    headers: {
+      'Origin': HF_SPACE_URL,
+      'Referer': HF_SPACE_URL,
+      // 传递其他必要的头部
+      'User-Agent': req.headers['user-agent'] || 'Node.js WebSocket Proxy',
+      'Cookie': req.headers['cookie'] || '',
+    },
   });
 
   // 处理目标 WebSocket 连接打开
@@ -93,7 +101,7 @@ function handleWebSocketConnection(ws, req) {
   // 处理目标 WebSocket 消息
   targetWs.on('message', (data) => {
     try {
-      // 处理 Socket.IO 的消息格式（与原代码相同）
+      // 处理 Socket.IO 的消息格式
       if (typeof data === 'string') {
         if (data.startsWith('data: ')) {
           data = data.substring(6); // 移除 "data: " 前缀
@@ -102,7 +110,6 @@ function handleWebSocketConnection(ws, req) {
           const parsed = JSON.parse(data);
           data = JSON.stringify(parsed);
         } catch (parseError) {
-          // 如果不是JSON，保持原样
           console.log('Non-JSON message:', data);
         }
       }
