@@ -1,7 +1,7 @@
 {
   "name": "websocket-proxy",
   "version": "1.0.0",
-  "description": "WebSocket and HTTP proxy server",
+  "description": "WebSocket代理服务器",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -14,5 +14,8 @@
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=16.0.0"
   }
 }
