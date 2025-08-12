@@ -1,66 +1,79 @@
-// index.js
+// index.js (v2 - More Robust)
 
 // 1. 导入所需模块
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
-const cors = require('cors');
-require('dotenv').config(); // 加载 .env 文件中的环境变量，主要用于本地开发
+// cors 中间件在这里不再是必需的，因为我们在 onProxyRes 中手动设置了头
+// const cors = require('cors'); 
+require('dotenv').config();
 
 // 2. 配置
-// 从环境变量中获取目标地址，这是部署到 Choreo 的关键
 const TARGET_HOST = process.env.TARGET_HOST;
-
-// 如果没有设置环境变量，则打印错误并退出，确保部署时不会出错
 if (!TARGET_HOST) {
-    console.error("错误：必须设置环境变量 TARGET_HOST。例如：TARGET_HOST=\"xxx-chat.hf.space\"");
-    process.exit(1); // 退出进程
+    console.error("错误：必须设置环境变量 TARGET_HOST。");
+    process.exit(1);
 }
-
-const TARGET_URL = `https://${TARGET_HOST}`;
-// Choreo 会通过 PORT 环境变量告诉我们应该监听哪个端口
-const PORT = process.env.PORT || 3001; 
+const TARGET_URL = `httpshttps://${TARGET_HOST}`;
+const PORT = process.env.PORT || 3001;
 
 // 3. 创建 Express 应用
 const app = express();
 
-// 4. 使用 CORS 中间件
-// 允许所有来源的跨域请求，这对于作为公共代理是必要的
-app.use(cors());
-
-// 5. 配置 http-proxy-middleware
+// 4. 配置 http-proxy-middleware
 const proxyOptions = {
-    // 代理的目标地址
     target: TARGET_URL,
-    
-    // 核心配置：更改请求头中的 'Host' 字段，使其与目标服务器匹配。
-    // 这对于很多云平台（包括 Hugging Face Space）是必需的。
     changeOrigin: true,
+    ws: true, // 保持 WebSocket 代理开启
+    logLevel: 'debug', // 使用 'debug' 级别日志以获取更详细的输出
 
-    // 启用 WebSocket 代理，聊天功能必需
-    ws: true,
-
-    // 重写请求头，模拟直接从浏览器访问目标网站
-    // 这部分和你 CF Worker 的逻辑是一致的
+    // 请求发往目标服务器之前的回调
     onProxyReq: (proxyReq, req, res) => {
+        // 确保请求头正确，模拟真实浏览器访问
         proxyReq.setHeader('Origin', TARGET_URL);
         proxyReq.setHeader('Referer', TARGET_URL);
     },
 
-    // 关键点：http-proxy-middleware 默认就是流式处理响应，
-    // 它会直接将目标服务器的响应流转发给客户端，
-    // 从而完美解决了 SSE 导致的 JSON 解析错误。
-    // 无需额外配置！
+    /**
+     *  ============== 关键的修改部分 ==============
+     *  收到目标服务器响应之后，发送给客户端之前的回调
+     */
+    onProxyRes: (proxyRes, req, res) => {
+        // 允许任何来源访问，这是代理的核心功能
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-    // 可选：增加日志，方便调试
-    logLevel: 'debug',
+        // Hugging Face Space 的 SSE 流通常使用 'text/event-stream'
+        // 我们需要确保这个 Content-Type 头被正确传递
+        const contentType = proxyRes.headers['content-type'];
+        console.log(`原始 Content-Type: ${contentType}`);
+
+        // 有些代理或云平台可能会意外地移除或修改 Content-Encoding 头，
+        // 导致浏览器无法正确处理压缩过的内容。
+        // 为了确保流式数据不被破坏，我们直接删除它，让数据以原始形式流向客户端。
+        delete proxyRes.headers['content-encoding'];
+        
+        // 对于流式响应，Content-Length 是不确定的。如果存在，可能会导致客户端等待一个永远不会达到的长度。
+        // 删除它可以强制客户端以 chunked 模式接收数据，这对于 SSE 是正确的。
+        delete proxyRes.headers['content-length'];
+        
+        console.log('已清理响应头，准备将数据流式传输到客户端。');
+    },
+
+    // 错误处理
+    onError: (err, req, res) => {
+        console.error('代理遇到错误:', err);
+        res.writeHead(502, { 'Content-Type': 'text/plain' });
+        res.end('Proxy Error: Could not connect to the target server.');
+    }
 };
 
-// 6. 创建代理中间件并应用到所有路由
+// 5. 创建并应用代理
 const hfProxy = createProxyMiddleware(proxyOptions);
 app.use('/', hfProxy);
 
-// 7. 启动服务器
+// 6. 启动服务器
 app.listen(PORT, () => {
-    console.log(`代理服务器已启动，正在监听端口 ${PORT}`);
-    console.log(`成功代理到 -> ${TARGET_URL}`);
+    console.log(`[v2] 增强型代理服务器已启动，监听端口 ${PORT}`);
+    console.log(`代理目标 -> ${TARGET_URL}`);
 });
