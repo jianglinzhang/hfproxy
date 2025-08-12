@@ -2,6 +2,7 @@ const http = require('http');
 const https = require('https');
 const url = require('url');
 const WebSocket = require('ws');
+const { URL } = require('url');
 
 const HF_SPACE_URL = process.env.TARGET_HOST || 'https://xxx-fastchat.hf.space';
 
@@ -59,12 +60,19 @@ const wss = new WebSocket.Server({ noServer: true });
 
 // 处理 HTTP 服务器的升级事件
 server.on('upgrade', (req, socket, head) => {
+  console.log('Upgrade request received:', {
+    url: req.url,
+    headers: req.headers,
+    upgrade: req.headers.upgrade
+  });
+
   // 检查是否是 WebSocket 升级请求
   if (req.headers['upgrade'] === 'websocket') {
     wss.handleUpgrade(req, socket, head, (ws) => {
       handleWebSocketConnection(ws, req);
     });
   } else {
+    console.log('Not a WebSocket upgrade request, destroying socket');
     socket.destroy();
   }
 });
@@ -74,10 +82,14 @@ function handleWebSocketConnection(ws, req) {
   const parsedUrl = url.parse(req.url);
   // 构建目标 WebSocket URL
   const targetWsUrl = HF_SPACE_URL.replace('https://', 'wss://') + parsedUrl.path;
+  
+  console.log('Attempting to connect to target WebSocket:', targetWsUrl);
 
   // 获取客户端请求中的子协议
   const clientProtocol = req.headers['sec-websocket-protocol'];
   const protocols = clientProtocol ? clientProtocol.split(',').map(s => s.trim()) : undefined;
+  
+  console.log('Client protocols:', protocols);
 
   // 创建到目标服务器的 WebSocket 连接
   const targetWs = new WebSocket(targetWsUrl, protocols, {
@@ -87,15 +99,20 @@ function handleWebSocketConnection(ws, req) {
     headers: {
       'Origin': HF_SPACE_URL,
       'Referer': HF_SPACE_URL,
-      // 传递其他必要的头部
       'User-Agent': req.headers['user-agent'] || 'Node.js WebSocket Proxy',
       'Cookie': req.headers['cookie'] || '',
+      // 传递所有原始头部
+      ...Object.fromEntries(
+        Object.entries(req.headers).filter(([key]) => 
+          !['host', 'upgrade', 'connection', 'sec-websocket-key', 'sec-websocket-version', 'sec-websocket-extensions'].includes(key.toLowerCase())
+        )
+      )
     },
   });
 
   // 处理目标 WebSocket 连接打开
   targetWs.on('open', () => {
-    console.log('Connected to target WebSocket');
+    console.log('Successfully connected to target WebSocket');
   });
 
   // 处理目标 WebSocket 消息
