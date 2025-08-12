@@ -1,69 +1,73 @@
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
+const { WebSocketServer } = require('ws');
 const WebSocket = require('ws');
 const http = require('http');
-const { URL } = require('url');
+const url = require('url');
 
 const app = express();
+const PORT = process.env.PORT || 3000;
+const TARGET_HOST = process.env.TARGET_HOST || 'https://xxx-fastchat.hf.space';
+
+// 创建HTTP服务器
 const server = http.createServer(app);
-const port = process.env.PORT || 3000;
 
-const HF_SPACE_URL = 'https://xxx-fastchat.hf.space';
-
-// CORS 中间件
+// 设置CORS中间件
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', '*');
   
   if (req.method === 'OPTIONS') {
-    res.sendStatus(200);
-  } else {
-    next();
+    return res.sendStatus(200);
   }
+  next();
 });
 
-// HTTP 代理中间件
-app.use('/', createProxyMiddleware({
-  target: HF_SPACE_URL,
+// 创建代理中间件
+const proxyMiddleware = createProxyMiddleware({
+  target: TARGET_HOST,
   changeOrigin: true,
   ws: false, // 我们单独处理WebSocket
   onProxyReq: (proxyReq, req, res) => {
-    proxyReq.setHeader('Origin', HF_SPACE_URL);
-    proxyReq.setHeader('Referer', HF_SPACE_URL);
+    proxyReq.setHeader('Origin', TARGET_HOST);
+    proxyReq.setHeader('Referer', TARGET_HOST);
   },
   onError: (err, req, res) => {
     console.error('代理错误:', err);
     res.status(500).send('代理错误: ' + err.message);
   }
-}));
+});
 
-// WebSocket 服务器
-const wss = new WebSocket.Server({ server, path: '/ws' });
+// 使用代理中间件处理所有HTTP请求
+app.use('/', proxyMiddleware);
 
-wss.on('connection', (clientWs, request) => {
-  console.log('客户端WebSocket连接建立');
+// WebSocket处理
+const wss = new WebSocketServer({ server });
+
+wss.on('connection', (ws, request) => {
+  console.log('新的WebSocket连接');
   
-  // 构建目标WebSocket URL
-  const url = new URL(request.url, `http://${request.headers.host}`);
-  const targetWsUrl = HF_SPACE_URL.replace('https://', 'wss://') + url.pathname + url.search;
+  // 解析请求URL
+  const parsedUrl = url.parse(request.url, true);
+  const targetWsUrl = TARGET_HOST.replace('https://', 'wss://') + parsedUrl.pathname + (parsedUrl.search || '');
   
-  console.log('连接到目标:', targetWsUrl);
+  console.log('连接到目标WebSocket:', targetWsUrl);
   
-  // 连接到目标WebSocket服务器
+  // 创建到目标服务器的WebSocket连接
   const targetWs = new WebSocket(targetWsUrl, {
     headers: {
-      'Origin': HF_SPACE_URL,
+      'Origin': TARGET_HOST,
       'User-Agent': request.headers['user-agent'] || 'Mozilla/5.0'
     }
   });
   
   // 目标服务器连接打开
   targetWs.on('open', () => {
-    console.log('成功连接到目标WebSocket');
+    console.log('已连接到目标WebSocket服务器');
   });
   
-  // 目标服务器消息处理
+  // 处理目标服务器消息
   targetWs.on('message', (data) => {
     try {
       let message = data.toString();
@@ -73,40 +77,42 @@ wss.on('connection', (clientWs, request) => {
         message = message.substring(6); // 移除 "data: " 前缀
       }
       
-      // 尝试解析并重新格式化消息
+      // 尝试解析JSON
       try {
         const parsed = JSON.parse(message);
         message = JSON.stringify(parsed);
       } catch (parseError) {
+        // 如果不是JSON，保持原样
         console.log('非JSON消息:', message);
       }
       
-      if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.send(message);
+      // 转发给客户端
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(message);
       }
     } catch (error) {
       console.error('消息处理错误:', error);
     }
   });
   
-  // 目标服务器连接关闭
+  // 处理目标服务器连接关闭
   targetWs.on('close', (code, reason) => {
     console.log('目标WebSocket连接关闭:', code, reason.toString());
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.close(code, reason);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.close(code, reason);
     }
   });
   
-  // 目标服务器错误
+  // 处理目标服务器错误
   targetWs.on('error', (error) => {
     console.error('目标WebSocket错误:', error);
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.close(1011, '目标连接错误');
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.close(1011, '目标连接错误');
     }
   });
   
-  // 客户端消息处理
-  clientWs.on('message', (data) => {
+  // 处理客户端消息
+  ws.on('message', (data) => {
     try {
       if (targetWs.readyState === WebSocket.OPEN) {
         targetWs.send(data);
@@ -116,27 +122,27 @@ wss.on('connection', (clientWs, request) => {
     }
   });
   
-  // 客户端连接关闭
-  clientWs.on('close', (code, reason) => {
+  // 处理客户端连接关闭
+  ws.on('close', (code, reason) => {
     console.log('客户端WebSocket连接关闭:', code, reason);
     if (targetWs.readyState === WebSocket.OPEN) {
       targetWs.close(code, reason);
     }
   });
   
-  // 客户端连接错误
-  clientWs.on('error', (error) => {
+  // 处理客户端错误
+  ws.on('error', (error) => {
     console.error('客户端WebSocket错误:', error);
     if (targetWs.readyState === WebSocket.OPEN) {
-      targetWs.close(1011, '客户端错误');
+      targetWs.close(1011, '客户端连接错误');
     }
   });
 });
 
-server.listen(port, () => {
-  console.log(`代理服务器运行在端口 ${port}`);
-  console.log(`HTTP代理: http://localhost:${port}`);
-  console.log(`WebSocket代理: ws://localhost:${port}/ws`);
+// 启动服务器
+server.listen(PORT, () => {
+  console.log(`代理服务器运行在端口 ${PORT}`);
+  console.log(`目标服务器: ${TARGET_HOST}`);
 });
 
 // 优雅关闭
