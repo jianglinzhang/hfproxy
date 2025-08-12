@@ -3,7 +3,7 @@ const https = require('https');
 const url = require('url');
 const WebSocket = require('ws');
 
-const HF_SPACE_URL = 'https://xxx-fastchat.hf.space';
+const HF_SPACE_URL = process.env.TARGET_HOST || 'https://xxx-fastchat.hf.space';
 
 // 创建HTTP服务器
 const server = http.createServer((req, res) => {
