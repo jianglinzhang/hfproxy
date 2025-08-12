@@ -1,18 +1,18 @@
 {
   "name": "hf-space-proxy",
   "version": "1.0.0",
-  "description": "A proxy server for Hugging Face Spaces to be deployed on Choreo.",
+  "description": "A Node.js proxy for Hugging Face Spaces, deployable on Choreo.",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "express": "^4.18.2",
-    "http-proxy-middleware": "^2.0.6",
-    "compression": "^1.7.4",
     "cors": "^2.8.5",
-    "dotenv": "^16.3.1"
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "http-proxy-middleware": "^3.0.0"
   }
 }
