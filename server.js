@@ -1,6 +1,5 @@
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
-const { WebSocketServer } = require('ws');
 const WebSocket = require('ws');
 const http = require('http');
 const url = require('url');
@@ -42,13 +41,13 @@ const proxyMiddleware = createProxyMiddleware({
 // 使用代理中间件处理所有HTTP请求
 app.use('/', proxyMiddleware);
 
-// 手动处理WebSocket升级请求
+// 处理WebSocket升级请求
 server.on('upgrade', (request, socket, head) => {
   console.log('收到WebSocket升级请求:', request.url);
   
   // 解析请求URL
   const parsedUrl = url.parse(request.url, true);
-  const targetWsUrl = TARGET_HOST.replace('https://', 'wss://') + parsedUrl.pathname + (parsedUrl.search || '');
+  const targetWsUrl = TARGET_HOST.replace('https://', 'wss://') + request.url;
   
   console.log('连接到目标WebSocket:', targetWsUrl);
   
@@ -58,50 +57,57 @@ server.on('upgrade', (request, socket, head) => {
       'Origin': TARGET_HOST,
       'User-Agent': request.headers['user-agent'] || 'Mozilla/5.0',
       'Accept-Encoding': request.headers['accept-encoding'] || '',
-      'Accept-Language': request.headers['accept-language'] || 'en-US,en;q=0.9'
+      'Accept-Language': request.headers['accept-language'] || '',
+      'Cache-Control': request.headers['cache-control'] || '',
+      'Pragma': request.headers['pragma'] || '',
+      'Sec-WebSocket-Extensions': request.headers['sec-websocket-extensions'] || '',
+      'Sec-WebSocket-Key': request.headers['sec-websocket-key'] || '',
+      'Sec-WebSocket-Version': request.headers['sec-websocket-version'] || '13'
     }
   });
-  
-  // 等待目标连接建立
+
+  let clientWs = null;
+
+  // 目标服务器连接打开
   targetWs.on('open', () => {
-    console.log('目标WebSocket连接已建立，开始升级客户端连接');
+    console.log('已连接到目标WebSocket服务器');
     
-    // 创建WebSocket服务器实例来处理这个连接
-    const wss = new WebSocketServer({ noServer: true });
+    // 创建客户端WebSocket连接
+    const wsServer = new WebSocket.WebSocketServer({ noServer: true });
     
-    // 升级客户端连接
-    wss.handleUpgrade(request, socket, head, (ws) => {
+    wsServer.handleUpgrade(request, socket, head, (ws) => {
+      clientWs = ws;
       console.log('客户端WebSocket连接已建立');
       
-      // 建立双向数据转发
-      setupBidirectionalForwarding(ws, targetWs);
+      // 处理客户端消息
+      clientWs.on('message', (data) => {
+        try {
+          if (targetWs.readyState === WebSocket.OPEN) {
+            targetWs.send(data);
+          }
+        } catch (error) {
+          console.error('转发客户端消息错误:', error);
+        }
+      });
+      
+      // 处理客户端连接关闭
+      clientWs.on('close', (code, reason) => {
+        console.log('客户端WebSocket连接关闭:', code, reason.toString());
+        if (targetWs.readyState === WebSocket.OPEN) {
+          targetWs.close(code, reason);
+        }
+      });
+      
+      // 处理客户端错误
+      clientWs.on('error', (error) => {
+        console.error('客户端WebSocket错误:', error);
+        if (targetWs.readyState === WebSocket.OPEN) {
+          targetWs.close(1011, '客户端连接错误');
+        }
+      });
     });
   });
   
-  // 如果目标连接失败，关闭客户端连接
-  targetWs.on('error', (error) => {
-    console.error('目标WebSocket连接错误:', error);
-    socket.destroy();
-  });
-  
-  targetWs.on('close', (code, reason) => {
-    console.log('目标WebSocket连接关闭:', code, reason.toString());
-    if (!socket.destroyed) {
-      socket.destroy();
-    }
-  });
-  
-  // 处理客户端连接错误
-  socket.on('error', (error) => {
-    console.error('客户端socket错误:', error);
-    if (targetWs.readyState === WebSocket.OPEN) {
-      targetWs.close();
-    }
-  });
-});
-
-// 设置双向数据转发
-function setupBidirectionalForwarding(clientWs, targetWs) {
   // 处理目标服务器消息
   targetWs.on('message', (data) => {
     try {
@@ -112,17 +118,17 @@ function setupBidirectionalForwarding(clientWs, targetWs) {
         message = message.substring(6); // 移除 "data: " 前缀
       }
       
-      // 尝试解析JSON（但不强制）
+      // 尝试解析JSON
       try {
         const parsed = JSON.parse(message);
         message = JSON.stringify(parsed);
       } catch (parseError) {
         // 如果不是JSON，保持原样
-        console.log('非JSON消息:', message.substring(0, 100));
+        console.log('非JSON消息:', message);
       }
       
       // 转发给客户端
-      if (clientWs.readyState === WebSocket.OPEN) {
+      if (clientWs && clientWs.readyState === WebSocket.OPEN) {
         clientWs.send(message);
       }
     } catch (error) {
@@ -133,7 +139,7 @@ function setupBidirectionalForwarding(clientWs, targetWs) {
   // 处理目标服务器连接关闭
   targetWs.on('close', (code, reason) => {
     console.log('目标WebSocket连接关闭:', code, reason.toString());
-    if (clientWs.readyState === WebSocket.OPEN) {
+    if (clientWs && clientWs.readyState === WebSocket.OPEN) {
       clientWs.close(code, reason);
     }
   });
@@ -141,44 +147,14 @@ function setupBidirectionalForwarding(clientWs, targetWs) {
   // 处理目标服务器错误
   targetWs.on('error', (error) => {
     console.error('目标WebSocket错误:', error);
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.close(1011, '目标连接错误');
-    }
+    socket.destroy();
   });
-  
-  // 处理客户端消息
-  clientWs.on('message', (data) => {
-    try {
-      if (targetWs.readyState === WebSocket.OPEN) {
-        targetWs.send(data);
-      }
-    } catch (error) {
-      console.error('客户端消息错误:', error);
-    }
-  });
-  
-  // 处理客户端连接关闭
-  clientWs.on('close', (code, reason) => {
-    console.log('客户端WebSocket连接关闭:', code, reason);
-    if (targetWs.readyState === WebSocket.OPEN) {
-      targetWs.close(code, reason);
-    }
-  });
-  
-  // 处理客户端错误
-  clientWs.on('error', (error) => {
-    console.error('客户端WebSocket错误:', error);
-    if (targetWs.readyState === WebSocket.OPEN) {
-      targetWs.close(1011, '客户端连接错误');
-    }
-  });
-}
+});
 
 // 启动服务器
 server.listen(PORT, () => {
   console.log(`代理服务器运行在端口 ${PORT}`);
   console.log(`目标服务器: ${TARGET_HOST}`);
-  console.log(`WebSocket代理已启用`);
 });
 
 // 优雅关闭
@@ -188,13 +164,4 @@ process.on('SIGTERM', () => {
     console.log('服务器已关闭');
     process.exit(0);
   });
-});
-
-// 错误处理
-process.on('uncaughtException', (error) => {
-  console.error('未捕获的异常:', error);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('未处理的Promise拒绝:', reason);
 });
