@@ -1,105 +1,182 @@
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const compression = require('compression');
+const cors = require('cors');
 require('dotenv').config();
 
 // --- 1. 配置 ---
 const PORT = process.env.PORT || 3000;
 const TARGET_URL = process.env.TARGET_URL;
+const NODE_ENV = process.env.NODE_ENV || 'development';
+
 if (!TARGET_URL) {
     console.error('【严重错误】环境变量 TARGET_URL 未设置！');
     process.exit(1);
 }
 
+console.log(`[INFO] 运行环境: ${NODE_ENV}`);
+console.log(`[INFO] 目标URL: ${TARGET_URL}`);
+
 // --- 2. 创建 Express 应用 ---
 const app = express();
 
-// --- 3. 添加压缩支持 ---
-app.use(compression({
-    filter: (req, res) => {
-        // 对SSE流不压缩
-        if (req.headers.accept && req.headers.accept.includes('text/event-stream')) {
-            return false;
+// --- 3. 开发环境特定配置 ---
+if (NODE_ENV === 'development') {
+    // 开发环境启用详细日志
+    app.use((req, res, next) => {
+        console.log(`[DEBUG] ${new Date().toISOString()} - ${req.method} ${req.url}`);
+        console.log(`[DEBUG] 请求头:`, JSON.stringify(req.headers, null, 2));
+        next();
+    });
+    
+    // 开发环境禁用压缩以便调试
+    console.log('[INFO] 开发模式: 禁用压缩以便调试');
+} else {
+    // 生产环境启用压缩（排除SSE流）
+    app.use(compression({
+        filter: (req, res) => {
+            if (req.headers.accept && req.headers.accept.includes('text/event-stream')) {
+                return false;
+            }
+            return compression.filter(req, res);
         }
-        return compression.filter(req, res);
-    }
+    }));
+}
+
+// --- 4. CORS 配置 ---
+app.use(cors({
+    origin: '*',
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Cookie']
 }));
 
-// --- 4. 中间件：记录所有进入的请求 ---
-app.use((req, res, next) => {
-    console.log(`[DEBUG-0] 收到请求: ${req.method} ${req.url}`);
-    console.log(`[DEBUG-0] 请求头:`, JSON.stringify(req.headers, null, 2));
-    next();
-});
+// --- 5. 请求体解析 ---
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// --- 5. 【必需】添加 JSON 请求体解析器 ---
-app.use(express.json());
+// --- 6. 开发环境请求体日志 ---
+if (NODE_ENV === 'development') {
+    app.use((req, res, next) => {
+        if (req.method === 'POST' || req.method === 'PUT') {
+            console.log(`[DEBUG] 请求体:`, req.body ? JSON.stringify(req.body).substring(0, 500) + '...' : '无请求体');
+        }
+        next();
+    });
+}
 
-// --- 6. 中间件：检查 JSON 解析后的请求体 ---
-app.use((req, res, next) => {
-    if (req.method === 'POST' || req.method === 'PUT') {
-        console.log(`[DEBUG-1] 请求体解析后:`, req.body ? JSON.stringify(req.body) : '无请求体');
-    }
-    next();
-});
-
-// --- 7. 【必需】健康检查端点 ---
+// --- 7. 健康检查端点 ---
 app.get('/health', (req, res) => {
-    console.log('[DEBUG-HEALTH] 健康检查通过');
+    console.log('[DEBUG] 健康检查通过');
     res.status(200).send('OK');
 });
 
-// --- 8. 【核心】配置并应用代理中间件 ---
+// --- 8. 代理中间件配置 ---
 const apiProxy = createProxyMiddleware({
     target: TARGET_URL,
     changeOrigin: true,
     ws: true,
-    buffer: false, // 禁用缓冲，支持流式传输
-    autoDecompress: false, // 禁用自动解压，避免破坏SSE流
-    xfwd: true, // 添加X-Forwarded-*头
-    logLevel: 'debug',
+    secure: false,
+    buffer: false,
+    autoDecompress: false,
+    xfwd: true,
+    logLevel: NODE_ENV === 'development' ? 'debug' : 'info',
+    
+    // 处理代理请求
     onProxyReq: (proxyReq, req, res) => {
-        console.log(`[DEBUG-2] 准备代理请求到: ${TARGET_URL}${req.originalUrl}`);
-        console.log(`[DEBUG-2] 代理请求头:`, JSON.stringify(proxyReq.getHeaders(), null, 2));
+        console.log(`[DEBUG] 代理请求: ${req.method} ${TARGET_URL}${req.originalUrl}`);
         
-        // 确保SSE请求不被压缩
+        // 转发认证头
+        if (req.headers.authorization) {
+            proxyReq.setHeader('Authorization', req.headers.authorization);
+        }
+        
+        // 转发Cookie
+        if (req.headers.cookie) {
+            proxyReq.setHeader('Cookie', req.headers.cookie);
+        }
+        
+        // SSE请求特殊处理
         if (req.headers.accept && req.headers.accept.includes('text/event-stream')) {
             proxyReq.setHeader('Accept-Encoding', 'identity');
+            proxyReq.setHeader('Cache-Control', 'no-cache');
+        }
+        
+        // 开发环境详细日志
+        if (NODE_ENV === 'development') {
+            console.log(`[DEBUG] 代理请求头:`, JSON.stringify(proxyReq.getHeaders(), null, 2));
         }
     },
+    
+    // 处理代理响应
     onProxyRes: (proxyRes, req, res) => {
-        console.log(`[DEBUG-3] 收到来自目标的响应，状态码: ${proxyRes.statusCode}`);
-        console.log(`[DEBUG-3] 目标响应头:`, JSON.stringify(proxyRes.headers, null, 2));
+        console.log(`[DEBUG] 代理响应: ${proxyRes.statusCode} ${req.method} ${req.originalUrl}`);
         
-        const originalContentType = proxyRes.headers['content-type'];
-        if (originalContentType && originalContentType.includes('text/event-stream')) {
-            console.log('[DEBUG-3] 检测到 SSE 流，设置适当的响应头');
+        // 开发环境详细日志
+        if (NODE_ENV === 'development') {
+            console.log(`[DEBUG] 代理响应头:`, JSON.stringify(proxyRes.headers, null, 2));
+        }
+        
+        // SSE流特殊处理
+        const contentType = proxyRes.headers['content-type'];
+        if (contentType && contentType.includes('text/event-stream')) {
+            console.log('[DEBUG] 检测到SSE流，设置响应头');
             
-            // 设置SSE必需的响应头
             res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
             res.setHeader('Cache-Control', 'no-cache, no-transform');
             res.setHeader('Connection', 'keep-alive');
-            res.setHeader('X-Accel-Buffering', 'no'); // 禁用Nginx缓冲
+            res.setHeader('X-Accel-Buffering', 'no');
             
-            // 移除可能导致问题的头
+            // 移除可能干扰SSE的头
             res.removeHeader('Content-Encoding');
             res.removeHeader('Content-Length');
         }
+        
+        // 转发Cookie
+        if (proxyRes.headers['set-cookie']) {
+            const cookies = proxyRes.headers['set-cookie'];
+            res.setHeader('Set-Cookie', cookies);
+            console.log('[DEBUG] 转发Cookie:', cookies);
+        }
     },
+    
+    // 错误处理
     onError: (err, req, res) => {
-        console.error('[DEBUG-ERROR] 代理发生严重错误:', err);
+        console.error('[ERROR] 代理错误:', err);
+        
+        if (NODE_ENV === 'development') {
+            console.error('[ERROR] 错误堆栈:', err.stack);
+        }
+        
         if (!res.headersSent) {
-            res.status(502).send('Proxy Error: ' + err.message);
+            res.status(502).send(
+                NODE_ENV === 'development' 
+                    ? `代理错误: ${err.message}\n${err.stack}` 
+                    : '代理错误'
+            );
         }
     }
 });
 
-// 将所有其他请求都交给代理处理
+// --- 9. 登录请求特殊处理 ---
+app.post('/api/v1/auths/signin', (req, res, next) => {
+    console.log('[DEBUG] 拦截登录请求:', req.body);
+    
+    // 确保登录请求有正确的Content-Type
+    if (!req.headers['content-type'] || !req.headers['content-type'].includes('application/json')) {
+        req.headers['content-type'] = 'application/json';
+    }
+    
+    next();
+}, apiProxy);
+
+// --- 10. 其他请求路由 ---
 app.use('/', apiProxy);
 
-// --- 9. 启动服务器 ---
+// --- 11. 启动服务器 ---
 app.listen(PORT, () => {
-    console.log(`代理服务器已启动，正在监听端口: ${PORT}`);
-    console.log(`将所有请求代理到: ${TARGET_URL}`);
-    console.log(`健康检查端点位于: /health`);
+    console.log(`[INFO] 代理服务器已启动，监听端口: ${PORT}`);
+    console.log(`[INFO] 目标服务器: ${TARGET_URL}`);
+    console.log(`[INFO] 健康检查端点: /health`);
+    console.log(`[INFO] 运行环境: ${NODE_ENV}`);
 });
