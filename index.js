@@ -23,139 +23,115 @@ app.use(cors({
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
 }));
 
-// --- 4. 添加压缩支持（排除SSE流）---
+// --- 4. 添加压缩支持（智能过滤SSE请求）---
 app.use(compression({
     filter: (req, res) => {
+        // 不压缩SSE流和WebSocket
         if (req.headers.accept && req.headers.accept.includes('text/event-stream')) {
+            return false;
+        }
+        if (req.headers.upgrade && req.headers.upgrade.includes('websocket')) {
             return false;
         }
         return compression.filter(req, res);
     }
 }));
 
-// --- 5. 请求解析器 ---
+// --- 5. 基础中间件 ---
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// --- 6. 调试中间件 ---
-app.use((req, res, next) => {
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
-    if (req.method === 'POST' && req.url.includes('/auth')) {
-        console.log('登录请求体:', JSON.stringify(req.body));
-    }
-    next();
-});
+// --- 6. 调试日志中间件（可选，生产环境可移除）---
+if (process.env.NODE_ENV !== 'production') {
+    app.use((req, res, next) => {
+        console.log(`[DEBUG] ${new Date().toISOString()} - ${req.method} ${req.url}`);
+        if (req.method === 'POST' && req.body) {
+            console.log(`[DEBUG] Request body:`, JSON.stringify(req.body).substring(0, 200) + '...');
+        }
+        next();
+    });
+}
 
 // --- 7. 健康检查端点 ---
 app.get('/health', (req, res) => {
     res.status(200).send('OK');
 });
 
-// --- 8. 代理中间件配置 ---
-const proxyOptions = {
+// --- 8. 智能代理中间件 ---
+const smartProxy = createProxyMiddleware({
     target: TARGET_URL,
     changeOrigin: true,
-    ws: false, // 默认不启用WebSocket，按需启用
+    ws: true, // 支持WebSocket，但不会强制所有请求使用WebSocket
     secure: false,
-    buffer: false,
-    autoDecompress: false,
     xfwd: true,
-    logLevel: 'debug',
+    logLevel: process.env.NODE_ENV === 'production' ? 'warn' : 'debug',
     
-    // 请求处理
+    // 智能处理请求
     onProxyReq: (proxyReq, req, res) => {
-        // 确保认证头正确传递
-        if (req.headers.authorization) {
-            proxyReq.setHeader('Authorization', req.headers.authorization);
-        }
-        
-        // 处理SSE请求
+        // 自动转发所有请求头
+        Object.keys(req.headers).forEach(key => {
+            // 跳过一些可能引起问题的头
+            if (!['host', 'connection', 'accept-encoding'].includes(key.toLowerCase())) {
+                proxyReq.setHeader(key, req.headers[key]);
+            }
+        });
+
+        // 特殊处理SSE请求
         if (req.headers.accept && req.headers.accept.includes('text/event-stream')) {
             proxyReq.setHeader('Accept-Encoding', 'identity');
             proxyReq.setHeader('Cache-Control', 'no-cache');
         }
-        
-        // 记录重要请求
-        if (req.url.includes('/auth') || req.url.includes('/chat')) {
-            console.log(`代理请求: ${req.method} ${req.url} -> ${TARGET_URL}${req.url}`);
-        }
+
+        // 处理请求体（自动处理，不需要手动写入）
+        // http-proxy-middleware 会自动处理 req.body
     },
     
-    // 响应处理
+    // 智能处理响应
     onProxyRes: (proxyRes, req, res) => {
-        // 处理SSE响应
-        if (proxyRes.headers['content-type']?.includes('text/event-stream')) {
-            console.log('检测到SSE响应，设置流式头');
+        // 检测SSE响应并设置正确的头
+        const contentType = proxyRes.headers['content-type'] || '';
+        if (contentType.includes('text/event-stream')) {
+            // 设置SSE必需的响应头
             res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
             res.setHeader('Cache-Control', 'no-cache, no-transform');
             res.setHeader('Connection', 'keep-alive');
             res.setHeader('X-Accel-Buffering', 'no');
+            
+            // 移除可能干扰SSE的头
             res.removeHeader('Content-Encoding');
             res.removeHeader('Content-Length');
         }
         
-        // 处理认证响应
-        if (req.url.includes('/auth')) {
-            console.log(`认证响应状态: ${proxyRes.statusCode}`);
-            if (proxyRes.headers['set-cookie']) {
-                console.log('设置Cookie:', proxyRes.headers['set-cookie']);
+        // 转发所有其他响应头
+        Object.keys(proxyRes.headers).forEach(key => {
+            if (!['content-length', 'content-encoding'].includes(key.toLowerCase()) || 
+                !contentType.includes('text/event-stream')) {
+                res.setHeader(key, proxyRes.headers[key]);
             }
-        }
+        });
     },
     
     // 错误处理
     onError: (err, req, res) => {
-        console.error(`代理错误: ${req.method} ${req.url}`, err);
+        console.error('[Proxy Error]', err);
         if (!res.headersSent) {
-            res.status(502).send('代理错误');
+            res.status(502).json({
+                error: 'Proxy Error',
+                message: err.message,
+                url: req.url
+            });
         }
     }
-};
+});
 
-// --- 9. 创建代理中间件 ---
-const apiProxy = createProxyMiddleware(proxyOptions);
+// --- 9. 应用代理 ---
+// 所有请求都通过智能代理处理
+app.use('/', smartProxy);
 
-// --- 10. 特殊路径处理 ---
-// 登录请求 - 普通HTTP请求
-app.post('/api/v1/auths/signin', (req, res, next) => {
-    console.log('拦截登录请求:', req.body);
-    // 确保登录请求使用普通HTTP代理
-    proxyOptions.ws = false;
-    next();
-}, apiProxy);
-
-// 聊天请求 - 可能使用SSE
-app.post('/api/v1/chat/completions', (req, res, next) => {
-    console.log('拦截聊天请求');
-    // 聊天请求可能需要SSE支持
-    if (req.headers.accept?.includes('text/event-stream')) {
-        proxyOptions.ws = false; // SSE不是WebSocket
-        proxyOptions.buffer = false;
-    }
-    next();
-}, apiProxy);
-
-// WebSocket连接（仅用于实际需要WebSocket的端点）
-app.use('/ws', createProxyMiddleware({
-    ...proxyOptions,
-    ws: true,
-    pathRewrite: { '^/ws': '' }
-}));
-
-// --- 11. 默认代理 ---
-app.use('/', (req, res, next) => {
-    // 根据路径动态决定是否启用WebSocket
-    if (req.url.startsWith('/ws')) {
-        proxyOptions.ws = true;
-    } else {
-        proxyOptions.ws = false;
-    }
-    next();
-}, apiProxy);
-
-// --- 12. 启动服务器 ---
+// --- 10. 启动服务器 ---
 app.listen(PORT, () => {
-    console.log(`代理服务器已启动，监听端口: ${PORT}`);
+    console.log(`通用代理服务器已启动，监听端口: ${PORT}`);
     console.log(`目标服务器: ${TARGET_URL}`);
-    console.log('健康检查: /health');
+    console.log(`健康检查: /health`);
+    console.log(`环境: ${process.env.NODE_ENV || 'development'}`);
 });
