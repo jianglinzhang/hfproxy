@@ -1,8 +1,7 @@
-// index.js
-
 // 1. 引入依赖
 require('dotenv').config();
 const express = require('express');
+const http = require('http');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 
 // 2. 检查环境变量
@@ -12,52 +11,67 @@ if (!TARGET_HOST) {
   process.exit(1);
 }
 
-// 3. 初始化 Express 应用
-const app = express();
-// 监听在 component.yaml 中声明的端口
-const PORT = process.env.PORT || 3000; 
+// --- 3. 创建 HTTP 代理服务 (监听 7890) ---
+const httpApp = express();
+const HTTP_PORT = 7890;
 
-// 4. 设置统一的代理中间件
-const proxy = createProxyMiddleware({
+const httpProxy = createProxyMiddleware({
   target: TARGET_HOST,
-  ws: true, // 启用 WebSocket 代理
-  changeOrigin: true, // 修改 Host 头
-
-  // 路径重写，以处理客户端可能存在的 /ws 前缀
-  pathRewrite: (path, req) => {
-    const newPath = path.startsWith('/ws') ? path.substring(3) : path;
-    console.log(`[Path Rewrite] From "${path}" to "${newPath}"`);
-    return newPath;
+  changeOrigin: true,
+  ws: false, // 这个服务器不处理 WebSocket
+  onProxyReq: (proxyReq, req, res) => {
+    proxyReq.setHeader('Origin', TARGET_HOST);
   },
-
-  on: {
-    proxyReq: (proxyReq, req, res) => {
-      proxyReq.setHeader('Origin', TARGET_HOST);
-      console.log(`[Proxy Req] ${req.method} ${req.originalUrl} -> ${TARGET_HOST}${proxyReq.path}`);
-    },
-    proxyReqWs: (proxyReq, req, socket, options, head) => {
-        proxyReq.setHeader('Origin', TARGET_HOST);
-        console.log(`[Proxy WS Req] ${req.url} -> ${TARGET_HOST}${proxyReq.path}`);
-    },
-    error: (err, req, res) => {
-      console.error('[Proxy Error]', err);
-    }
-  },
-
   logLevel: 'debug',
 });
 
-// 5. 应用中间件
-app.use('/', proxy);
+httpApp.use('/', httpProxy);
 
-// 6. 启动服务器
-const server = app.listen(PORT, () => {
-  console.log(`代理服务器已启动，监听端口 ${PORT}`);
-  console.log(`正在代理到 -> ${TARGET_HOST}`);
+const httpServer = http.createServer(httpApp);
+httpServer.listen(HTTP_PORT, () => {
+  console.log(`HTTP Proxy Server listening on port ${HTTP_PORT}`);
 });
 
-// http-proxy-middleware 会自动处理服务器的 'upgrade' 事件
-// 不需要我们手动操作
+
+// --- 4. 创建 WebSocket 代理服务 (监听 7891) ---
+const wsApp = express();
+const WS_PORT = 7891;
+
+const wsProxy = createProxyMiddleware({
+  target: TARGET_HOST,
+  changeOrigin: true,
+  ws: true, // 这个服务器专门处理 WebSocket
+  pathRewrite: {
+    '^/ws': '', // Choreo 会把 /ws 的请求路由到这里，我们需要把它去掉再发给目标
+  },
+  onProxyReqWs: (proxyReq, req, socket, options, head) => {
+    proxyReq.setHeader('Origin', TARGET_HOST);
+  },
+  logLevel: 'debug',
+});
+
+// WebSocket 代理需要一个基础的 HTTP 服务器来监听 upgrade 事件
+const wsServer = http.createServer(wsApp);
+
+// 将所有请求都交给代理处理
+wsApp.use('/', wsProxy); 
+// http-proxy-middleware 会自动监听 upgrade 事件
+wsServer.on('upgrade', wsProxy.upgrade);
+
+wsServer.listen(WS_PORT, () => {
+  console.log(`WebSocket Proxy Server listening on port ${WS_PORT}`);
+});
+
+// --- 5. 优雅关闭 ---
+process.on('SIGTERM', () => {
+  console.log('Received SIGTERM, shutting down servers...');
+  httpServer.close(() => {
+    console.log('HTTP server closed.');
+  });
+  wsServer.close(() => {
+    console.log('WebSocket server closed.');
+  });
+});
 
 
 // const express = require('express');
