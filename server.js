@@ -14,7 +14,7 @@ if (!TARGET_HOST) {
 // 3. 初始化应用和服务器
 const app = express();
 const server = http.createServer(app);
-const PORT = 8080; // 只使用这一个端口
+const PORT = 7890; // 只使用这一个端口
 
 // --- 4. 创建两个代理实例 ---
 
