@@ -7,11 +7,11 @@ kind: Component
 # 组件元数据
 metadata:
   # 组件名称，必须与你在Choreo UI上创建的组件名称一致
-  name: nodejs-proxy-service # <-- 把这里改成你的组件名
+  name: hfproxy # <-- 把这里改成你的组件名
   # 项目名称
-  project: default # <-- 通常是 'default'，除非你改过
+  project: Default # <-- 通常是 'default'，除非你改过
   # 组织名称
-  organization: your-organization-name # <-- 把这里改成你的组织名
+  organization: huanbao # <-- 把这里改成你的组织名
 spec:
   # 组件类型
   type: Service
@@ -20,7 +20,7 @@ spec:
     # 使用的构建包
     buildPack: NodeJS
     # 构建包版本
-    buildPackVersion: 18.x.x
+    buildPackVersion: 20.x.x
   # 网络配置
   network:
     # 暴露的端点列表
@@ -28,7 +28,7 @@ spec:
       # 这是我们的代理服务的主端点
       - name: ProxyEndpoint
         # 服务监听的端口
-        port: 3000
+        port: 7890
         # 协议类型 - 这是最关键的一行！
         type: WS
         # 网络可见性，决定了URL
