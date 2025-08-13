@@ -11,65 +11,79 @@ if (!TARGET_HOST) {
   process.exit(1);
 }
 
-// --- 3. 创建 HTTP 代理服务 (监听 7890) ---
-const httpApp = express();
-const HTTP_PORT = 7890;
+// 3. 初始化应用和服务器
+const app = express();
+const server = http.createServer(app);
+const PORT = 8080; // 只使用这一个端口
 
-const httpProxy = createProxyMiddleware({
-  target: TARGET_HOST,
-  changeOrigin: true,
-  ws: false, // 这个服务器不处理 WebSocket
-  onProxyReq: (proxyReq, req, res) => {
-    proxyReq.setHeader('Origin', TARGET_HOST);
-  },
-  logLevel: 'debug',
-});
+// --- 4. 创建两个代理实例 ---
 
-httpApp.use('/', httpProxy);
-
-const httpServer = http.createServer(httpApp);
-httpServer.listen(HTTP_PORT, () => {
-  console.log(`HTTP Proxy Server listening on port ${HTTP_PORT}`);
-});
-
-
-// --- 4. 创建 WebSocket 代理服务 (监听 7891) ---
-const wsApp = express();
-const WS_PORT = 7891;
-
+// 代理 A: 专门处理 WebSocket
 const wsProxy = createProxyMiddleware({
   target: TARGET_HOST,
   changeOrigin: true,
-  ws: true, // 这个服务器专门处理 WebSocket
+  ws: true,
   pathRewrite: {
-    '^/ws': '', // Choreo 会把 /ws 的请求路由到这里，我们需要把它去掉再发给目标
+    '^/ws': '', // 去掉 /ws 前缀
   },
   onProxyReqWs: (proxyReq, req, socket, options, head) => {
     proxyReq.setHeader('Origin', TARGET_HOST);
   },
   logLevel: 'debug',
+  logProvider: () => console, // 确保日志能输出
 });
 
-// WebSocket 代理需要一个基础的 HTTP 服务器来监听 upgrade 事件
-const wsServer = http.createServer(wsApp);
-
-// 将所有请求都交给代理处理
-wsApp.use('/', wsProxy); 
-// http-proxy-middleware 会自动监听 upgrade 事件
-wsServer.on('upgrade', wsProxy.upgrade);
-
-wsServer.listen(WS_PORT, () => {
-  console.log(`WebSocket Proxy Server listening on port ${WS_PORT}`);
+// 代理 B: 专门处理普通 HTTP
+const httpProxy = createProxyMiddleware({
+  target: TARGET_HOST,
+  changeOrigin: true,
+  ws: false,
+  onProxyReq: (proxyReq, req, res) => {
+    proxyReq.setHeader('Origin', TARGET_HOST);
+  },
+  logLevel: 'debug',
+  logProvider: () => console,
 });
 
-// --- 5. 优雅关闭 ---
+
+// --- 5. 智能路由核心 ---
+
+// 对所有路径应用一个中间件
+app.use((req, res, next) => {
+  // 检查是否是 WebSocket 升级请求
+  if (req.headers.upgrade && req.headers.upgrade.toLowerCase() === 'websocket') {
+    // 如果是，什么都不做，让它传递给服务器的 'upgrade' 事件监听器
+    console.log(`[Router] Passing upgrade request to WS proxy: ${req.url}`);
+    return next();
+  }
+  // 如果是普通 HTTP 请求，则交给 httpProxy 处理
+  console.log(`[Router] Passing HTTP request to HTTP proxy: ${req.url}`);
+  return httpProxy(req, res, next);
+});
+
+// 监听服务器的 'upgrade' 事件，并手动交给 wsProxy 处理
+server.on('upgrade', (req, socket, head) => {
+  // 只有路径匹配 /ws/... 的升级请求才会被处理
+  if (req.url.startsWith('/ws')) {
+    console.log(`[Upgrade Handler] Forwarding to wsProxy: ${req.url}`);
+    wsProxy.upgrade(req, socket, head);
+  } else {
+    console.log(`[Upgrade Handler] Destroying socket for unhandled path: ${req.url}`);
+    socket.destroy();
+  }
+});
+
+
+// --- 6. 启动服务器 ---
+server.listen(PORT, () => {
+  console.log(`Unified Proxy Server listening on port ${PORT}`);
+});
+
+// --- 7. 优雅关闭 ---
 process.on('SIGTERM', () => {
-  console.log('Received SIGTERM, shutting down servers...');
-  httpServer.close(() => {
-    console.log('HTTP server closed.');
-  });
-  wsServer.close(() => {
-    console.log('WebSocket server closed.');
+  console.log('Received SIGTERM, shutting down server...');
+  server.close(() => {
+    console.log('Server closed.');
   });
 });
 
