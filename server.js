@@ -16,25 +16,32 @@ const PORT = process.env.PORT || 3000;
 
 // 4. 设置代理中间件
 const proxyOptions = {
-  // 目标服务器地址
   target: TARGET_HOST,
-
-  // 启用 WebSocket 和修改 Origin
   ws: true,
   changeOrigin: true,
-
-  // 路径重写
-  pathRewrite: {
-    '^/ws': '',
+  
+  // 我们不再使用 pathRewrite，而是用 router
+  router: (req) => {
+    // 原始请求路径，例如 /ws/socket.io/...
+    const originalPath = req.url;
+    
+    // 重写路径，例如 /socket.io/...
+    const rewrittenPath = originalPath.replace(/^\/ws/, '');
+    
+    // 手动构建完整的目标 URL
+    const newTarget = TARGET_HOST + rewrittenPath;
+    
+    console.log(`[Router] Routing ${originalPath} to ${newTarget}`);
+    
+    // 返回新的、完整的URL作为目标
+    return newTarget;
   },
 
-  // 修改请求头
+  // 我们仍然需要修改 Origin
   onProxyReq: (proxyReq, req, res) => {
-    // 确保 Origin 头被正确设置
     proxyReq.setHeader('Origin', TARGET_HOST);
   },
   
-  // 为了调试，我们保留日志
   logLevel: 'debug',
 };
 
