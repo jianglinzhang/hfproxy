@@ -1,12 +1,9 @@
-// 1. 引入依赖
 require('dotenv').config();
 const express = require('express');
-const { createProxyMiddleware } = require('http-proxy-middleware');
 const { createServer } = require('http');
-const WebSocket = require('ws');
-const { URL } = require('url');
+const httpProxy = require('http-proxy');
+const cors = require('cors');
 
-// 2. 检查环境变量
 const TARGET_HOST = process.env.TARGET_HOST;
 if (!TARGET_HOST) {
   console.error('错误: 环境变量 TARGET_HOST 未设置。');
@@ -15,288 +12,120 @@ if (!TARGET_HOST) {
 
 console.log(`目标主机: ${TARGET_HOST}`);
 
-// 3. 初始化 Express 应用
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 4. CORS 中间件
-app.use(require('cors')({
+// CORS 设置
+app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['*'],
   credentials: false
 }));
 
-// 5. HTTP 代理中间件
-const httpProxy = createProxyMiddleware({
+// 创建 HTTP 代理实例
+const proxy = httpProxy.createProxyServer({
   target: TARGET_HOST,
   changeOrigin: true,
-  ws: false, // 我们手动处理 WebSocket
+  ws: true,
   timeout: 60000,
   proxyTimeout: 60000,
-  
-  // 请求头处理
-  onProxyReq: (proxyReq, req, res) => {
-    // 设置正确的 Origin 和 Referer
-    proxyReq.setHeader('Origin', TARGET_HOST);
-    proxyReq.setHeader('Referer', TARGET_HOST);
-    console.log(`[HTTP] ${req.method} ${req.originalUrl} -> ${TARGET_HOST}${proxyReq.path}`);
-  },
-  
-  onProxyRes: (proxyRes, req, res) => {
-    console.log(`[HTTP Response] ${req.method} ${req.originalUrl} -> ${proxyRes.statusCode}`);
-  },
-  
-  onError: (err, req, res) => {
-    console.error('[HTTP Proxy Error]', err.message);
-    if (res && !res.headersSent) {
-      res.writeHead(500, { 'Content-Type': 'text/plain' });
-      res.end('HTTP Proxy error: ' + err.message);
-    }
+  headers: {
+    'Connection': 'keep-alive'
   }
 });
 
-// 6. 应用 HTTP 代理
-app.use('/', httpProxy);
+// 处理代理错误
+proxy.on('error', (err, req, res) => {
+  console.error('[Proxy Error]', err.message);
+  if (res && !res.headersSent) {
+    res.writeHead(500, {
+      'Content-Type': 'text/plain',
+      'Access-Control-Allow-Origin': '*'
+    });
+    res.end('代理错误: ' + err.message);
+  }
+});
 
-// 7. 创建 HTTP 服务器
+// 处理 HTTP 请求的代理响应
+proxy.on('proxyRes', (proxyRes, req, res) => {
+  console.log(`[HTTP] ${req.method} ${req.url} -> ${proxyRes.statusCode}`);
+  
+  // 添加 CORS 头
+  proxyRes.headers['Access-Control-Allow-Origin'] = '*';
+  proxyRes.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS';
+  proxyRes.headers['Access-Control-Allow-Headers'] = '*';
+});
+
+// 处理 WebSocket 代理
+proxy.on('proxyReqWs', (proxyReq, req, socket, options, head) => {
+  console.log(`[WebSocket] 升级请求: ${req.url}`);
+  
+  // 设置正确的请求头
+  proxyReq.setHeader('Origin', TARGET_HOST);
+  proxyReq.setHeader('Referer', TARGET_HOST);
+});
+
+proxy.on('open', (proxySocket) => {
+  console.log('[WebSocket] 代理连接已建立');
+  proxySocket.on('data', (data) => {
+    console.log('[WebSocket] 收到数据:', data.length, '字节');
+  });
+});
+
+proxy.on('close', (res, socket, head) => {
+  console.log('[WebSocket] 代理连接已关闭');
+});
+
+// 所有 HTTP 请求通过代理
+app.use('/', (req, res) => {
+  console.log(`[HTTP Request] ${req.method} ${req.url}`);
+  proxy.web(req, res);
+});
+
+// 创建服务器
 const server = createServer(app);
 
-// 8. 手动处理 WebSocket 升级
-server.on('upgrade', async (request, socket, head) => {
-  const url = new URL(request.url, `http://${request.headers.host}`);
-  const pathname = url.pathname;
-  const search = url.search || '';
-  
-  console.log(`[WebSocket Upgrade] ${pathname}${search}`);
+// 重要：手动处理 WebSocket 升级
+server.on('upgrade', (request, socket, head) => {
+  console.log(`[Server Upgrade] ${request.url}`);
+  console.log('[Server Upgrade] Headers:', request.headers);
   
   // 检查是否是 WebSocket 升级请求
-  if (request.headers.upgrade !== 'websocket') {
-    console.log('[WebSocket] 非 WebSocket 升级请求，忽略');
-    socket.destroy();
+  const isWebSocket = request.headers.upgrade && 
+                     request.headers.upgrade.toLowerCase() === 'websocket';
+  
+  if (!isWebSocket) {
+    console.log('[Server Upgrade] 非 WebSocket 请求，拒绝升级');
+    socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
     return;
   }
   
-  try {
-    // 构建目标 WebSocket URL
-    const targetUrl = TARGET_HOST.replace(/^https?:/, 'ws:').replace(/^http:/, 'ws:') + pathname + search;
-    console.log(`[WebSocket] 连接目标: ${targetUrl}`);
-    
-    // 创建到目标服务器的 WebSocket 连接
-    const targetWs = new WebSocket(targetUrl, {
-      headers: {
-        'Origin': TARGET_HOST,
-        'Referer': TARGET_HOST,
-        'User-Agent': request.headers['user-agent'] || 'Node.js WebSocket Proxy'
-      },
-      handshakeTimeout: 30000
-    });
-    
-    // 处理目标 WebSocket 连接打开
-    targetWs.on('open', () => {
-      console.log('[WebSocket] 成功连接到目标服务器');
-      
-      // 构建 WebSocket 响应头
-      const key = request.headers['sec-websocket-key'];
-      const acceptKey = require('crypto')
-        .createHash('sha1')
-        .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
-        .digest('base64');
-      
-      const responseHeaders = [
-        'HTTP/1.1 101 Switching Protocols',
-        'Upgrade: websocket',
-        'Connection: Upgrade',
-        `Sec-WebSocket-Accept: ${acceptKey}`,
-        'Access-Control-Allow-Origin: *',
-        'Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers: *',
-        ''
-      ].join('\r\n');
-      
-      // 发送升级响应
-      socket.write(responseHeaders + '\r\n');
-      
-      // 双向消息转发
-      const forwardMessage = (data, direction) => {
-        try {
-          console.log(`[WebSocket ${direction}] 消息长度: ${data.length}`);
-          return true;
-        } catch (error) {
-          console.error(`[WebSocket ${direction} Error]`, error.message);
-          return false;
-        }
-      };
-      
-      // 目标服务器 -> 客户端
-      targetWs.on('message', (data) => {
-        if (forwardMessage(data, 'Target->Client')) {
-          try {
-            // 处理 WebSocket 帧格式
-            const frame = createWebSocketFrame(data);
-            socket.write(frame);
-          } catch (error) {
-            console.error('[WebSocket Frame Error]', error.message);
-          }
-        }
-      });
-      
-      // 客户端 -> 目标服务器
-      socket.on('data', (data) => {
-        try {
-          // 解析 WebSocket 帧
-          const messages = parseWebSocketFrames(data);
-          messages.forEach(message => {
-            if (message && forwardMessage(message, 'Client->Target')) {
-              targetWs.send(message);
-            }
-          });
-        } catch (error) {
-          console.error('[WebSocket Parse Error]', error.message);
-        }
-      });
-    });
-    
-    // 处理目标服务器连接错误
-    targetWs.on('error', (error) => {
-      console.error('[WebSocket Target Error]', error.message);
-      socket.destroy();
-    });
-    
-    // 处理目标服务器关闭
-    targetWs.on('close', (code, reason) => {
-      console.log(`[WebSocket Target Closed] Code: ${code}, Reason: ${reason}`);
-      socket.destroy();
-    });
-    
-    // 处理客户端连接关闭
-    socket.on('close', () => {
-      console.log('[WebSocket Client Closed]');
-      if (targetWs.readyState === WebSocket.OPEN) {
-        targetWs.close();
-      }
-    });
-    
-    // 处理客户端连接错误
-    socket.on('error', (error) => {
-      console.error('[WebSocket Client Error]', error.message);
-      if (targetWs.readyState === WebSocket.OPEN) {
-        targetWs.close();
-      }
-    });
-    
-  } catch (error) {
-    console.error('[WebSocket Setup Error]', error.message);
-    socket.destroy();
-  }
+  console.log('[Server Upgrade] 转发 WebSocket 升级请求');
+  proxy.ws(request, socket, head);
 });
 
-// 9. WebSocket 帧处理函数
-function createWebSocketFrame(data) {
-  const payload = Buffer.from(data);
-  const payloadLength = payload.length;
-  
-  let frame;
-  if (payloadLength < 126) {
-    frame = Buffer.allocUnsafe(2 + payloadLength);
-    frame[0] = 0x81; // FIN + text frame
-    frame[1] = payloadLength;
-    payload.copy(frame, 2);
-  } else if (payloadLength < 65536) {
-    frame = Buffer.allocUnsafe(4 + payloadLength);
-    frame[0] = 0x81; // FIN + text frame
-    frame[1] = 126;
-    frame.writeUInt16BE(payloadLength, 2);
-    payload.copy(frame, 4);
-  } else {
-    frame = Buffer.allocUnsafe(10 + payloadLength);
-    frame[0] = 0x81; // FIN + text frame
-    frame[1] = 127;
-    frame.writeUInt32BE(0, 2); // 高32位
-    frame.writeUInt32BE(payloadLength, 6); // 低32位
-    payload.copy(frame, 10);
-  }
-  
-  return frame;
-}
-
-function parseWebSocketFrames(buffer) {
-  const messages = [];
-  let offset = 0;
-  
-  while (offset < buffer.length) {
-    if (offset + 2 > buffer.length) break;
-    
-    const firstByte = buffer[offset];
-    const secondByte = buffer[offset + 1];
-    
-    const fin = (firstByte & 0x80) === 0x80;
-    const opcode = firstByte & 0x0F;
-    const masked = (secondByte & 0x80) === 0x80;
-    let payloadLength = secondByte & 0x7F;
-    
-    let totalHeaderLength = 2;
-    
-    if (payloadLength === 126) {
-      if (offset + 4 > buffer.length) break;
-      payloadLength = buffer.readUInt16BE(offset + 2);
-      totalHeaderLength = 4;
-    } else if (payloadLength === 127) {
-      if (offset + 10 > buffer.length) break;
-      payloadLength = buffer.readUInt32BE(offset + 6); // 只读低32位
-      totalHeaderLength = 10;
-    }
-    
-    if (masked) {
-      totalHeaderLength += 4; // mask key
-    }
-    
-    if (offset + totalHeaderLength + payloadLength > buffer.length) break;
-    
-    if (opcode === 1 || opcode === 2) { // text or binary frame
-      let payload = buffer.slice(offset + totalHeaderLength, offset + totalHeaderLength + payloadLength);
-      
-      if (masked) {
-        const maskKey = buffer.slice(offset + totalHeaderLength - 4, offset + totalHeaderLength);
-        for (let i = 0; i < payload.length; i++) {
-          payload[i] ^= maskKey[i % 4];
-        }
-      }
-      
-      if (opcode === 1) { // text frame
-        messages.push(payload.toString('utf8'));
-      } else { // binary frame
-        messages.push(payload);
-      }
-    }
-    
-    offset += totalHeaderLength + payloadLength;
-  }
-  
-  return messages;
-}
-
-// 10. 启动服务器
-server.listen(PORT, () => {
+// 启动服务器
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`代理服务器已启动，监听端口 ${PORT}`);
   console.log(`正在代理 -> ${TARGET_HOST}`);
   console.log(`WebSocket 支持: 已启用`);
 });
 
-// 11. 优雅关闭
-process.on('SIGTERM', () => {
-  console.log('收到 SIGTERM，正在关闭服务器...');
+// 优雅关闭处理
+const gracefulShutdown = () => {
+  console.log('正在关闭服务器...');
   server.close(() => {
-    console.log('服务器已关闭。');
+    console.log('服务器已关闭');
+    proxy.close(() => {
+      console.log('代理已关闭');
+      process.exit(0);
+    });
   });
-});
+};
 
-process.on('SIGINT', () => {
-  console.log('收到 SIGINT，正在关闭服务器...');
-  server.close(() => {
-    console.log('服务器已关闭。');
-  });
-});
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
 
 // const express = require('express');
 // const { createProxyMiddleware } = require('http-proxy-middleware');
