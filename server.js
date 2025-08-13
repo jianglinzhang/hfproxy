@@ -91,31 +91,48 @@ server.on('upgrade', (req, client_socket, head) => {
       console.log('[WS] Client connected.');
       
       // 双向转发消息
-      target_ws.on('message', (message) => client_ws.send(message));
-      client_ws.on('message', (message) => target_ws.send(message));
+      target_ws.on('message', (message) => {
+        if (client_ws.readyState === WebSocket.OPEN) {
+          client_ws.send(message);
+        }
+      });
+      client_ws.on('message', (message) => {
+        if (target_ws.readyState === WebSocket.OPEN) {
+          target_ws.send(message);
+        }
+      });
 
       // 处理关闭事件
       target_ws.on('close', (code, reason) => {
         console.log('[WS] Target closed connection.');
-        client_ws.close(code, reason);
+        if (client_ws.readyState === WebSocket.OPEN) {
+          client_ws.close(code, reason.toString());
+        }
       });
       client_ws.on('close', (code, reason) => {
         console.log('[WS] Client closed connection.');
-        target_ws.close(code, reason);
+        if (target_ws.readyState === WebSocket.OPEN) {
+          target_ws.close(code, reason.toString());
+        }
       });
 
       // 处理错误事件
       target_ws.on('error', (err) => {
         console.error('[WS] Target error:', err);
-        client_ws.close(1011, 'Target connection error');
+        if (client_ws.readyState === WebSocket.OPEN) {
+          client_ws.close(1011, 'Target connection error');
+        }
       });
       client_ws.on('error', (err) => {
         console.error('[WS] Client error:', err);
-        target_ws.close(1011, 'Client connection error');
+        if (target_ws.readyState === WebSocket.OPEN) {
+          target_ws.close(1011, 'Client connection error');
+        }
       });
     });
   } else {
     // 如果不是我们想处理的 WebSocket，销毁它
+    console.log(`[WS] Ignoring upgrade request for unknown path: ${req.url}`);
     client_socket.destroy();
   }
 });
