@@ -6,25 +6,31 @@ endpoints:
   # 定义 HTTP 代理端点
   - name: http-proxy
     # +required 你的应用中 HTTP 服务器监听的端口
-    port: 7890
-    # +required 类型为 REST
+    # +required Type of traffic that the endpoint is accepting.
     type: REST
-    # +optional 网络可见性，设置为 Public
+    # +optional Network level visibilities of the endpoint.
     networkVisibilities:
       - Public
-    # +optional Context (base path) of the API
-    # 我们代理所有路径，所以这里可以留空或设置为 /
-    basePath: /
+    # +required Service section has the user service endpoint details
+    service:
+      # +optional Context (base path) of the API that gets exposed via the endpoint.
+      # Choreo 会将所有匹配 basePath 的请求路由到此端点
+      basePath: /
+      # +required Numeric port value that gets exposed via the endpoint
+      port: 7890
 
   # 定义 WebSocket 代理端点
   - name: websocket-proxy
-    # +required 你的应用中 WebSocket 服务器监听的端口，必须与 HTTP 不同
-    port: 7891
-    # +required 类型为 WS
+    # +required 你的应用中 WebSocket 服务器监听的端口
+    # +required Type of traffic that the endpoint is accepting.
     type: WS
-    # +optional 网络可见性，设置为 Public
+    # +optional Network level visibilities of the endpoint.
     networkVisibilities:
       - Public
-    # +optional Context (base path) of the API
-    # 客户端会请求 /ws，所以我们设置 context 为 /ws
-    basePath: /ws
+    # +required Service section has the user service endpoint details
+    service:
+      # +optional Context (base path) of the API that gets exposed via the endpoint.
+      # Choreo 会将所有匹配 /ws 的请求路由到此端点
+      basePath: /ws
+      # +required Numeric port value that gets exposed via the endpoint
+      port: 7891
