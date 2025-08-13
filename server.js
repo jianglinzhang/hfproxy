@@ -1,7 +1,10 @@
 // 1. 引入依赖
 require('dotenv').config();
 const express = require('express');
-const { createProxyMiddleware } = require('http-proxy-middleware');
+const http = require('http');
+const https = require('httpsa'); // 注意：这里是 https
+const WebSocket = require('ws');
+const { URL } = require('url');
 
 // 2. 检查环境变量
 const TARGET_HOST = process.env.TARGET_HOST;
@@ -9,66 +12,112 @@ if (!TARGET_HOST) {
   console.error('错误: 环境变量 TARGET_HOST 未设置。');
   process.exit(1);
 }
+const targetUrl = new URL(TARGET_HOST);
 
 // 3. 初始化 Express 应用
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 4. 设置代理中间件 (最终正确版)
-const proxy = createProxyMiddleware({
-  // 目标服务器，只包含协议和主机名
-  target: TARGET_HOST,
+// 4. 手动处理所有 HTTP/HTTPS 请求
+app.use('*', (client_req, client_res) => {
+  console.log(`[HTTP] Intercepting: ${client_req.method} ${client_req.originalUrl}`);
 
-  // 必须开启，以支持 WebSocket 和修改 Origin
-  ws: true,
-  changeOrigin: true,
+  // 构造发往目标服务器的请求选项
+  const options = {
+    hostname: targetUrl.hostname,
+    port: targetUrl.port || (targetUrl.protocol === 'https:' ? 443 : 80),
+    path: client_req.originalUrl,
+    method: client_req.method,
+    headers: {
+      ...client_req.headers,
+      'host': targetUrl.hostname, // 必须修改 host
+      'origin': TARGET_HOST,      // 必须修改 origin
+      'referer': TARGET_HOST,     // 最好也修改 referer
+    },
+  };
 
-  // 路径重写：
-  // 如果请求路径以 /ws 开头，则去掉 /ws。
-  // 其他所有路径 (如 /static/splash-dark.png) 不受影响，保持原样。
-  pathRewrite: (path, req) => {
-    const newPath = path.startsWith('/ws') ? path.substring(3) : path;
-    console.log(`[Path Rewrite] From "${path}" to "${newPath}"`);
-    return newPath;
-  },
+  // 创建到目标服务器的请求
+  const proxy_req = https.request(options, (proxy_res) => {
+    console.log(`[HTTP] Response from target: ${proxy_res.statusCode}`);
+    
+    // 将目标服务器的响应头写回客户端，并添加CORS头
+    client_res.writeHead(proxy_res.statusCode, {
+      ...proxy_res.headers,
+      'access-control-allow-origin': '*',
+    });
 
-  // 我们仍然需要在请求被代理前修改 Origin 头
-  onProxyReq: (proxyReq, req, res) => {
-    proxyReq.setHeader('Origin', TARGET_HOST);
-  },
+    // 将目标服务器的响应体通过管道流回客户端
+    proxy_res.pipe(client_res, { end: true });
+  });
 
-  // 开启详细日志以供调试
-  logLevel: 'debug',
-  
-  // 错误处理
-  onError: (err, req, res) => {
-    console.error('[Proxy Error]', err.code, req.method, req.url);
-    if (res.writeHead) { // 确保 res 是一个 HTTP 响应对象
-        if (!res.headersSent) {
-            res.writeHead(500, { 'Content-Type': 'text/plain' });
-            res.end('Proxy error: ' + err.message);
-        }
-    } else { // 如果是 WebSocket 错误，res 可能是一个 socket
-        res.end();
+  // 将客户端的请求体通过管道流到目标服务器
+  client_req.pipe(proxy_req, { end: true });
+
+  proxy_req.on('error', (err) => {
+    console.error('[HTTP] Proxy Request Error:', err);
+    if (!client_res.headersSent) {
+      client_res.status(502).send('Bad Gateway');
     }
-  }
+  });
 });
 
-// 5. 应用中间件
-app.use(proxy);
-
-// 6. 启动服务器
-const server = app.listen(PORT, () => {
-  console.log(`代理服务器已启动，监听端口 ${PORT}`);
+// 5. 创建 HTTP 服务器并启动
+const server = http.createServer(app);
+server.listen(PORT, () => {
+  console.log(`手动代理服务器已启动，监听端口 ${PORT}`);
   console.log(`正在代理到 -> ${TARGET_HOST}`);
 });
 
-// 优雅地处理服务器关闭
-process.on('SIGTERM', () => {
-    console.log('收到 SIGTERM，正在关闭服务器...');
-    server.close(() => {
-        console.log('服务器已关闭。');
+// 6. 手动处理 WebSocket 升级请求
+const wss = new WebSocket.Server({ noServer: true });
+
+server.on('upgrade', (req, client_socket, head) => {
+  // 只处理我们关心的路径
+  if (req.url.startsWith('/ws/socket.io')) {
+    const target_path = req.url.substring(3); // 去掉 '/ws'
+    const target_ws_url = `wss://${targetUrl.hostname}${target_path}`;
+    
+    console.log(`[WS] Intercepting upgrade request for: ${req.url}`);
+    console.log(`[WS] Connecting to target: ${target_ws_url}`);
+
+    // 创建到目标 WebSocket 服务器的连接
+    const target_ws = new WebSocket(target_ws_url, {
+      origin: TARGET_HOST, // 设置正确的 Origin
+      headers: { ...req.headers, host: targetUrl.hostname }
     });
+
+    // 客户端连接处理
+    wss.handleUpgrade(req, client_socket, head, (client_ws) => {
+      console.log('[WS] Client connected.');
+      
+      // 双向转发消息
+      target_ws.on('message', (message) => client_ws.send(message));
+      client_ws.on('message', (message) => target_ws.send(message));
+
+      // 处理关闭事件
+      target_ws.on('close', (code, reason) => {
+        console.log('[WS] Target closed connection.');
+        client_ws.close(code, reason);
+      });
+      client_ws.on('close', (code, reason) => {
+        console.log('[WS] Client closed connection.');
+        target_ws.close(code, reason);
+      });
+
+      // 处理错误事件
+      target_ws.on('error', (err) => {
+        console.error('[WS] Target error:', err);
+        client_ws.close(1011, 'Target connection error');
+      });
+      client_ws.on('error', (err) => {
+        console.error('[WS] Client error:', err);
+        target_ws.close(1011, 'Client connection error');
+      });
+    });
+  } else {
+    // 如果不是我们想处理的 WebSocket，销毁它
+    client_socket.destroy();
+  }
 });
 
 
