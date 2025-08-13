@@ -2,7 +2,7 @@
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
-const https = require('httpsa'); // 注意：这里是 https
+const https = require('https'); 
 const WebSocket = require('ws');
 const { URL } = require('url');
 
