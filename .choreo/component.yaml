@@ -1,37 +1,30 @@
-# .choreo/component.yaml
+# +required The configuration file schema version
+schemaVersion: 1.2
 
-# API版本
-apiVersion: v1
-# 组件类型
-kind: Component
-# 组件元数据
-metadata:
-  # 组件名称，必须与你在Choreo UI上创建的组件名称一致
-  name: hfproxy # <-- 把这里改成你的组件名
-  # 项目名称
-  project: Default # <-- 通常是 'default'，除非你改过
-  # 组织名称
-  organization: huanbao # <-- 把这里改成你的组织名
-spec:
-  # 组件类型
-  type: Service
-  # 构建配置
-  build:
-    # 使用的构建包
-    buildPack: NodeJS
-    # 构建包版本
-    buildPackVersion: 20.x.x
-  # 网络配置
-  network:
-    # 暴露的端点列表
-    endpoints:
-      # 这是我们的代理服务的主端点
-      - name: ProxyEndpoint
-        # 服务监听的端口
-        port: 7890
-        # 协议类型 - 这是最关键的一行！
-        type: WS
-        # 网络可见性，决定了URL
-        networkVisibility: Public
-        # 上下文路径，所有请求都会被路由到这里
-        context: /
+# +optional Incoming connection details for the component
+endpoints:
+  # 定义 HTTP 代理端点
+  - name: http-proxy
+    # +required 你的应用中 HTTP 服务器监听的端口
+    port: 7890
+    # +required 类型为 REST
+    type: REST
+    # +optional 网络可见性，设置为 Public
+    networkVisibilities:
+      - Public
+    # +optional Context (base path) of the API
+    # 我们代理所有路径，所以这里可以留空或设置为 /
+    basePath: /
+
+  # 定义 WebSocket 代理端点
+  - name: websocket-proxy
+    # +required 你的应用中 WebSocket 服务器监听的端口，必须与 HTTP 不同
+    port: 7891
+    # +required 类型为 WS
+    type: WS
+    # +optional 网络可见性，设置为 Public
+    networkVisibilities:
+      - Public
+    # +optional Context (base path) of the API
+    # 客户端会请求 /ws，所以我们设置 context 为 /ws
+    basePath: /ws
