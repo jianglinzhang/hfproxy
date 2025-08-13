@@ -2,6 +2,7 @@
 require('dotenv').config();
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
+const http = require('http'); // 引入 http 模块
 
 // 2. 检查环境变量
 const TARGET_HOST = process.env.TARGET_HOST;
@@ -14,48 +15,35 @@ if (!TARGET_HOST) {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 4. 设置代理中间件 (完美克隆版)
-const proxy = createProxyMiddleware({
-  // 目标服务器地址
+// 4. 设置代理中间件 (只处理 HTTP)
+const httpProxy = createProxyMiddleware({
   target: TARGET_HOST,
-  
-  // 启用 WebSocket 代理
-  ws: true,
-  
-  // 修改请求头中的 'Host' 字段，必须为 true
   changeOrigin: true,
+  // 注意：这里我们暂时不启用 ws: true，因为我们将手动处理
+  ws: false, 
 
-  // 路径重写：这是为了处理客户端固定请求 /ws/socket.io 的情况
-  // 如果请求路径是 /ws/socket.io/...，它会被重写为 /socket.io/...
-  // 如果请求路径是 /info，它不会被重写，保持原样
   pathRewrite: {
-    '^/ws': '', 
+    '^/ws': '',
   },
 
-  // 在转发请求前进行修改
   onProxyReq: (proxyReq, req, res) => {
-    // 核心：将 Origin 头修改为目标服务器，欺骗服务器以为是同源请求
     proxyReq.setHeader('Origin', TARGET_HOST);
-    console.log(`[Proxy HTTP Req] ${req.method} ${req.originalUrl} -> Forwarding to ${TARGET_HOST}${proxyReq.path}`);
-  },
-  onProxyReqWs: (proxyReq, req, socket, options, head) => {
-    // 核心：同样为 WebSocket 请求修改 Origin 头
-    proxyReq.setHeader('Origin', TARGET_HOST);
-    console.log(`[Proxy WS Req] ${req.url} -> Forwarding to ${TARGET_HOST}${proxyReq.path}`);
+    console.log(`[HTTP Proxy] ${req.method} ${req.originalUrl} -> ${TARGET_HOST}${proxyReq.path}`);
   },
 
-  // 在收到目标服务器响应后进行修改
   onProxyRes: (proxyRes, req, res) => {
-    // 确保所有响应都允许跨域，防止浏览器阻止前端加载
+    // 为普通HTTP响应添加CORS头
+    Object.keys(proxyRes.headers).forEach((key) => {
+        if (key.toLowerCase().startsWith('access-control-')) {
+            res.setHeader(key, proxyRes.headers[key]);
+        }
+    });
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', '*');
-    console.log(`[Proxy Res] ${req.method} ${req.originalUrl} -> Status: ${proxyRes.statusCode}`);
+    console.log(`[HTTP Response] ${req.method} ${req.originalUrl} -> Status: ${proxyRes.statusCode}`);
   },
 
-  // 错误处理
   onError: (err, req, res) => {
-    console.error('[Proxy Error]', err);
+    console.error('[HTTP Proxy Error]', err);
     if (res && res.writeHead && !res.headersSent) {
       res.writeHead(500, { 'Content-Type': 'text/plain' });
       res.end('Proxy error: ' + err.message);
@@ -63,15 +51,41 @@ const proxy = createProxyMiddleware({
   }
 });
 
-// 5. 应用中间件
-// 核心改动：将代理应用到所有路径 ('/')
-// 并且删除了 app.get('/')
-app.use('/', proxy);
+// 5. 应用 HTTP 代理中间件
+app.use('/', httpProxy);
 
-// 6. 启动服务器
-const server = app.listen(PORT, () => {
+// 6. 创建 HTTP 服务器并启动
+const server = http.createServer(app);
+
+server.listen(PORT, () => {
   console.log(`代理服务器已启动，监听端口 ${PORT}`);
-  console.log(`正在将所有请求代理到 -> ${TARGET_HOST}`);
+  console.log(`正在代理到 -> ${TARGET_HOST}`);
+});
+
+// 7. --- 关键修复：手动处理 WebSocket 升级事件 ---
+// 创建一个专门用于 WebSocket 的代理实例
+const wsProxy = createProxyMiddleware({
+    target: TARGET_HOST,
+    ws: true,
+    changeOrigin: true,
+    pathRewrite: {
+        '^/ws': '',
+    },
+    onProxyReqWs: (proxyReq, req, socket, options, head) => {
+        proxyReq.setHeader('Origin', TARGET_HOST);
+        console.log(`[WS Proxy Req] ${req.url} -> ${TARGET_HOST}${proxyReq.path}`);
+    },
+    onError: (err, req, socket) => {
+        console.error('[WS Proxy Error]', err);
+        socket.end(); // 发生错误时关闭连接
+    }
+});
+
+// 监听服务器的 'upgrade' 事件
+server.on('upgrade', (req, socket, head) => {
+  console.log('[Server] Received WebSocket upgrade request.');
+  // 手动调用 WebSocket 代理的处理函数
+  wsProxy.upgrade(req, socket, head);
 });
 
 // 优雅地处理服务器关闭
@@ -79,6 +93,7 @@ process.on('SIGTERM', () => {
     console.log('收到 SIGTERM，正在关闭服务器...');
     server.close(() => {
         console.log('服务器已关闭。');
+        process.exit(0);
     });
 });
 
