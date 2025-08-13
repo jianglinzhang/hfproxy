@@ -14,38 +14,45 @@ if (!TARGET_HOST) {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 4. 设置代理中间件
-const proxyOptions = {
+// 4. 设置代理中间件 (最终正确版)
+const proxy = createProxyMiddleware({
+  // 目标服务器，只包含协议和主机名
   target: TARGET_HOST,
+
+  // 必须开启，以支持 WebSocket 和修改 Origin
   ws: true,
   changeOrigin: true,
-  
-  // 我们不再使用 pathRewrite，而是用 router
-  router: (req) => {
-    // 原始请求路径，例如 /ws/socket.io/...
-    const originalPath = req.url;
-    
-    // 重写路径，例如 /socket.io/...
-    const rewrittenPath = originalPath.replace(/^\/ws/, '');
-    
-    // 手动构建完整的目标 URL
-    const newTarget = TARGET_HOST + rewrittenPath;
-    
-    console.log(`[Router] Routing ${originalPath} to ${newTarget}`);
-    
-    // 返回新的、完整的URL作为目标
-    return newTarget;
+
+  // 路径重写：
+  // 如果请求路径以 /ws 开头，则去掉 /ws。
+  // 其他所有路径 (如 /static/splash-dark.png) 不受影响，保持原样。
+  pathRewrite: (path, req) => {
+    const newPath = path.startsWith('/ws') ? path.substring(3) : path;
+    console.log(`[Path Rewrite] From "${path}" to "${newPath}"`);
+    return newPath;
   },
 
-  // 我们仍然需要修改 Origin
+  // 我们仍然需要在请求被代理前修改 Origin 头
   onProxyReq: (proxyReq, req, res) => {
     proxyReq.setHeader('Origin', TARGET_HOST);
   },
-  
-  logLevel: 'debug',
-};
 
-const proxy = createProxyMiddleware(proxyOptions);
+  // 开启详细日志以供调试
+  logLevel: 'debug',
+  
+  // 错误处理
+  onError: (err, req, res) => {
+    console.error('[Proxy Error]', err.code, req.method, req.url);
+    if (res.writeHead) { // 确保 res 是一个 HTTP 响应对象
+        if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'text/plain' });
+            res.end('Proxy error: ' + err.message);
+        }
+    } else { // 如果是 WebSocket 错误，res 可能是一个 socket
+        res.end();
+    }
+  }
+});
 
 // 5. 应用中间件
 app.use(proxy);
