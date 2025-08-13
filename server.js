@@ -13,284 +13,232 @@ if (!TARGET_HOST) {
 }
 
 console.log(`目标主机: ${TARGET_HOST}`);
-console.log(`当前时间: ${new Date().toISOString()}\n`);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 全局 CORS 设置
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'HEAD', 'PATCH'],
-  allowedHeaders: ['*'],
-  credentials: false,
-  preflightContinue: false,
-  optionsSuccessStatus: 204
-}));
-
-// 处理 OPTIONS 预检请求
-app.options('*', (req, res) => {
-  console.log(`[OPTIONS] ${req.url}`);
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH');
-  res.header('Access-Control-Allow-Headers', '*');
-  res.sendStatus(200);
+// 防止进程意外退出的保护机制
+process.on('SIGTERM', () => {
+  console.log('收到 SIGTERM，延迟关闭以完成请求处理...');
+  setTimeout(() => {
+    console.log('优雅关闭服务器');
+    process.exit(0);
+  }, 5000);
 });
 
-// 创建 HTTP 代理实例
+// CORS 设置
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'HEAD'],
+  allowedHeaders: ['*'],
+  credentials: false
+}));
+
+// 创建代理实例
 const proxy = httpProxy.createProxyServer({
   target: TARGET_HOST,
   changeOrigin: true,
   ws: true,
-  timeout: 120000,
-  proxyTimeout: 120000,
+  timeout: 60000,
+  proxyTimeout: 60000,
   secure: true,
-  followRedirects: true,
-  headers: {
-    'User-Agent': 'Node.js WebSocket Proxy Server'
-  }
+  followRedirects: true
 });
 
-// 代理事件处理
+// 代理错误处理
 proxy.on('error', (err, req, res, target) => {
-  console.error(`[Proxy Error] ${err.message}`);
-  console.error(`[Proxy Error] URL: ${req.url}`);
-  console.error(`[Proxy Error] Target: ${target || TARGET_HOST}`);
+  console.error(`[Proxy Error] ${err.message} - URL: ${req.url}`);
   
-  if (res && res.writeHead && !res.headersSent) {
-    res.writeHead(502, {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*'
-    });
-    res.end(JSON.stringify({
-      error: '代理服务器错误',
-      message: err.message,
-      code: 502
-    }));
-  }
-});
-
-proxy.on('proxyRes', (proxyRes, req, res) => {
-  const status = proxyRes.statusCode;
-  const method = req.method;
-  const url = req.url;
-  
-  console.log(`[HTTP ${status}] ${method} ${url}`);
-  
-  // 强制添加 CORS 头
-  proxyRes.headers['Access-Control-Allow-Origin'] = '*';
-  proxyRes.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH';
-  proxyRes.headers['Access-Control-Allow-Headers'] = '*';
-  
-  // 特殊处理 Socket.IO 相关响应
-  if (url.includes('/socket.io/')) {
-    console.log(`[Socket.IO Response] ${method} ${url} -> ${status}`);
-    if (status === 400) {
-      console.log(`[Socket.IO Error] 可能的原因: WebSocket 升级失败或协议版本不匹配`);
+  if (res && !res.headersSent) {
+    // 根据请求类型返回不同格式的错误
+    const acceptsJSON = req.headers.accept && req.headers.accept.includes('application/json');
+    const isAPI = req.url.includes('/api/') || req.url.includes('/socket.io/');
+    
+    if (acceptsJSON || isAPI) {
+      res.writeHead(502, {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*'
+      });
+      res.end(JSON.stringify({
+        error: 'Proxy Error',
+        message: err.message,
+        code: 502
+      }));
+    } else {
+      res.writeHead(502, {
+        'Content-Type': 'text/html',
+        'Access-Control-Allow-Origin': '*'
+      });
+      res.end(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>代理错误</title>
+          <meta charset="utf-8">
+        </head>
+        <body>
+          <h1>502 代理服务器错误</h1>
+          <p>无法连接到目标服务器: ${TARGET_HOST}</p>
+          <p>错误信息: ${err.message}</p>
+          <p>请稍后重试或联系管理员。</p>
+        </body>
+        </html>
+      `);
     }
   }
 });
 
-proxy.on('proxyReq', (proxyReq, req, res) => {
-  // 设置代理请求头
-  proxyReq.setHeader('Origin', TARGET_HOST);
-  proxyReq.setHeader('Referer', TARGET_HOST);
+// 响应处理
+proxy.on('proxyRes', (proxyRes, req, res) => {
+  const status = proxyRes.statusCode;
+  console.log(`[${status}] ${req.method} ${req.url}`);
   
-  const method = req.method;
+  // 添加 CORS 头
+  proxyRes.headers['access-control-allow-origin'] = '*';
+  proxyRes.headers['access-control-allow-methods'] = 'GET, POST, PUT, DELETE, OPTIONS, HEAD';
+  proxyRes.headers['access-control-allow-headers'] = '*';
+  
+  // 确保 MIME 类型正确
   const url = req.url;
-  console.log(`[HTTP Req] ${method} ${url} -> ${TARGET_HOST}${url}`);
+  if (url.endsWith('.js') && proxyRes.headers['content-type']) {
+    if (!proxyRes.headers['content-type'].includes('javascript')) {
+      proxyRes.headers['content-type'] = 'application/javascript; charset=utf-8';
+    }
+  } else if (url.endsWith('.json') && proxyRes.headers['content-type']) {
+    if (!proxyRes.headers['content-type'].includes('json')) {
+      proxyRes.headers['content-type'] = 'application/json; charset=utf-8';
+    }
+  } else if (url.endsWith('.css') && proxyRes.headers['content-type']) {
+    if (!proxyRes.headers['content-type'].includes('css')) {
+      proxyRes.headers['content-type'] = 'text/css; charset=utf-8';
+    }
+  }
 });
 
+// WebSocket 代理处理
 proxy.on('proxyReqWs', (proxyReq, req, socket, options, head) => {
-  console.log(`�� [WebSocket Proxy] 升级请求开始`);
-  console.log(`�� [WebSocket Proxy] URL: ${req.url}`);
-  console.log(`�� [WebSocket Proxy] 目标: ${TARGET_HOST}${req.url}`);
-  
-  // 设置 WebSocket 代理请求头
+  console.log(`[WebSocket] 代理升级请求: ${req.url}`);
   proxyReq.setHeader('Origin', TARGET_HOST);
   proxyReq.setHeader('Referer', TARGET_HOST);
-  proxyReq.setHeader('User-Agent', req.headers['user-agent'] || 'Node.js WebSocket Proxy');
-  
-  console.log(`�� [WebSocket Proxy] 请求头已设置\n`);
 });
 
 proxy.on('open', (proxySocket) => {
-  console.log(`✅ [WebSocket] 代理连接已建立`);
-  
-  proxySocket.on('data', (data) => {
-    console.log(`�� [WebSocket Data] 收到 ${data.length} 字节`);
-  });
-  
-  proxySocket.on('close', () => {
-    console.log(`❌ [WebSocket] 代理连接已关闭`);
-  });
-  
-  proxySocket.on('error', (err) => {
-    console.error(`�� [WebSocket] 代理连接错误: ${err.message}`);
-  });
+  console.log('[WebSocket] 代理连接建立成功');
 });
 
 proxy.on('close', (res, socket, head) => {
-  console.log(`�� [WebSocket] 连接关闭事件`);
+  console.log('[WebSocket] 代理连接关闭');
 });
 
-// 请求日志中间件
-app.use((req, res, next) => {
-  const timestamp = new Date().toISOString();
-  const method = req.method;
-  const url = req.url;
-  const userAgent = req.headers['user-agent'] || 'Unknown';
-  
-  console.log(`\n[${timestamp}] ${method} ${url}`);
-  console.log(`User-Agent: ${userAgent.substring(0, 100)}...`);
-  
-  // 检查是否可能是 WebSocket 相关请求
-  const isSocketIOPath = url.includes('/socket.io/') || url.includes('/ws/');
-  const hasUpgrade = req.headers.upgrade;
-  const hasConnection = req.headers.connection;
-  
-  if (isSocketIOPath) {
-    console.log(`�� [Socket.IO] 检测到 Socket.IO 相关路径`);
-    console.log(`�� [Socket.IO] Upgrade Header: ${hasUpgrade}`);
-    console.log(`�� [Socket.IO] Connection Header: ${hasConnection}`);
-    console.log(`�� [Socket.IO] Query Params:`, req.query);
-  }
-  
-  next();
-});
-
-// Socket.IO 健康检查端点
-app.get('/socket.io/health', (req, res) => {
-  console.log(`�� [Health Check] Socket.IO 健康检查`);
+// 健康检查端点
+app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
-    proxy_target: TARGET_HOST,
+    target: TARGET_HOST,
     timestamp: new Date().toISOString(),
-    websocket_support: true
+    uptime: process.uptime()
   });
 });
 
-// 根路径重定向
+// 根路径处理 - 避免直接代理可能导致的问题
 app.get('/', (req, res) => {
-  console.log(`�� [Root] 根路径访问，重定向到目标服务器`);
+  console.log('[Root] 根路径访问');
+  
+  // 添加缓存控制头
+  res.set({
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    'Pragma': 'no-cache',
+    'Expires': '0'
+  });
+  
   proxy.web(req, res);
 });
 
-// Socket.IO 轮询处理（重要）
+// Socket.IO 特殊处理
 app.all('/socket.io/*', (req, res) => {
-  const method = req.method;
+  console.log(`[Socket.IO] ${req.method} ${req.url}`);
+  console.log(`[Socket.IO] Transport: ${req.query.transport}`);
+  
+  // 设置适当的头部
+  res.set({
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    'Pragma': 'no-cache',
+    'Expires': '0'
+  });
+  
+  proxy.web(req, res);
+});
+
+// API 路径处理
+app.all('/api/*', (req, res) => {
+  console.log(`[API] ${req.method} ${req.url}`);
+  proxy.web(req, res);
+});
+
+// 静态资源处理 - 特别关注 MIME 类型
+app.use('/static/*', (req, res, next) => {
+  console.log(`[Static] ${req.url}`);
+  
+  // 预设正确的 MIME 类型
   const url = req.url;
-  const transport = req.query.transport;
-  
-  console.log(`�� [Socket.IO Route] ${method} ${url}`);
-  console.log(`�� [Socket.IO Route] Transport: ${transport}`);
-  
-  if (transport === 'websocket' && method === 'GET') {
-    console.log(`⚡ [Socket.IO Route] WebSocket 传输模式检测`);
-    console.log(`⚡ [Socket.IO Route] 等待 WebSocket 升级事件...`);
+  if (url.endsWith('.js')) {
+    res.type('application/javascript');
+  } else if (url.endsWith('.json')) {
+    res.type('application/json');
+  } else if (url.endsWith('.css')) {
+    res.type('text/css');
+  } else if (url.endsWith('.html')) {
+    res.type('text/html');
   }
   
-  // 转发到目标服务器
   proxy.web(req, res);
 });
 
-// 所有其他路径的代理
+// 应用资源处理（特别针对 _app 路径）
+app.use('/_app/*', (req, res, next) => {
+  console.log(`[App] ${req.url}`);
+  
+  // 强制设置正确的 MIME 类型
+  if (req.url.includes('.js')) {
+    res.type('application/javascript');
+  }
+  
+  proxy.web(req, res);
+});
+
+// 捕获所有其他请求
 app.use('*', (req, res) => {
-  console.log(`�� [Catch All] ${req.method} ${req.originalUrl}`);
+  console.log(`[Proxy] ${req.method} ${req.originalUrl}`);
   proxy.web(req, res);
 });
 
-// 创建 HTTP 服务器
+// 创建服务器
 const server = createServer(app);
 
-// 核心：WebSocket 升级事件处理
+// WebSocket 升级处理
 server.on('upgrade', (request, socket, head) => {
-  const timestamp = new Date().toISOString();
-  console.log(`\n�� ============ WebSocket 升级事件 [${timestamp}] ============`);
-  console.log(`�� URL: ${request.url}`);
-  console.log(`�� Method: ${request.method}`);
+  console.log(`[Upgrade] WebSocket 升级请求: ${request.url}`);
   
-  // 详细头部信息
-  console.log(`�� Headers:`);
-  Object.entries(request.headers).forEach(([key, value]) => {
-    console.log(`   ${key}: ${value}`);
-  });
-  
-  // URL 解析
-  const parsedUrl = parse(request.url, true);
-  console.log(`�� 解析后的 URL:`, {
-    pathname: parsedUrl.pathname,
-    query: parsedUrl.query,
-    search: parsedUrl.search
-  });
-  
-  // 检查 WebSocket 升级条件
-  const upgrade = request.headers.upgrade;
-  const connection = request.headers.connection;
-  const isWebSocket = upgrade && upgrade.toLowerCase() === 'websocket';
-  const isUpgradeConnection = connection && connection.toLowerCase().includes('upgrade');
-  
-  console.log(`✅ 升级检查结果:`);
-  console.log(`   Upgrade Header: ${upgrade} (${isWebSocket ? '✓' : '✗'})`);
-  console.log(`   Connection Header: ${connection} (${isUpgradeConnection ? '✓' : '✗'})`);
+  const isWebSocket = request.headers.upgrade && 
+                     request.headers.upgrade.toLowerCase() === 'websocket';
   
   if (!isWebSocket) {
-    console.log(`❌ 拒绝非 WebSocket 升级请求`);
-    socket.write('HTTP/1.1 400 Bad Request\r\n');
-    socket.write('Content-Type: text/plain\r\n');
-    socket.write('Access-Control-Allow-Origin: *\r\n');
-    socket.write('\r\n');
-    socket.write('WebSocket upgrade required');
-    socket.end();
+    console.log('[Upgrade] 拒绝非 WebSocket 升级');
+    socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
     return;
   }
   
-  console.log(`�� 开始 WebSocket 代理到: ${TARGET_HOST}${request.url}`);
-  
-  // 设置错误处理
-  const handleProxyError = (error) => {
-    console.error(`�� WebSocket 代理错误: ${error.message}`);
-    console.error(`�� 错误详情:`, error);
-    
-    if (!socket.destroyed) {
-      socket.write('HTTP/1.1 502 Bad Gateway\r\n');
-      socket.write('Content-Type: text/plain\r\n');
-      socket.write('Access-Control-Allow-Origin: *\r\n');
-      socket.write('\r\n');
-      socket.write(`WebSocket proxy error: ${error.message}`);
-      socket.end();
-    }
-  };
-  
-  try {
-    // 执行 WebSocket 代理
-    proxy.ws(request, socket, head, {
-      target: TARGET_HOST,
-      ws: true,
-      changeOrigin: true,
-      headers: {
-        'Origin': TARGET_HOST,
-        'Referer': TARGET_HOST,
-        'User-Agent': request.headers['user-agent'] || 'Node.js WebSocket Proxy'
-      }
-    }, handleProxyError);
-    
-    console.log(`✅ WebSocket 代理请求已发送`);
-    
-  } catch (error) {
-    handleProxyError(error);
-  }
-  
-  console.log(`�� ============ WebSocket 升级事件结束 ============\n`);
+  console.log('[Upgrade] 转发 WebSocket 升级请求');
+  proxy.ws(request, socket, head);
 });
 
-// 服务器事件处理
+// 服务器错误处理
 server.on('error', (error) => {
-  console.error(`�� [Server Error]`, error);
+  console.error('[Server Error]', error);
 });
 
 server.on('clientError', (err, socket) => {
-  console.error(`�� [Client Error]`, err.message);
+  console.error('[Client Error]', err.message);
   if (!socket.destroyed) {
     socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
   }
@@ -298,78 +246,57 @@ server.on('clientError', (err, socket) => {
 
 // 启动服务器
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n�� =============== 服务器启动成功 ===============`);
-  console.log(`�� 服务器地址: http://0.0.0.0:${PORT}`);
+  console.log(`✅ 代理服务器启动成功`);
+  console.log(`�� 监听地址: http://0.0.0.0:${PORT}`);
   console.log(`�� 代理目标: ${TARGET_HOST}`);
   console.log(`⚡ WebSocket 支持: 已启用`);
   console.log(`�� 启动时间: ${new Date().toISOString()}`);
-  console.log(`�� Node.js 版本: ${process.version}`);
-  console.log(`�� 环境变量:`);
-  console.log(`   PORT: ${PORT}`);
-  console.log(`   TARGET_HOST: ${TARGET_HOST}`);
-  console.log(`�� ===============================================`);
 });
 
 // 优雅关闭处理
-const gracefulShutdown = (signal) => {
-  console.log(`�� 收到 ${signal} 信号，开始优雅关闭...`);
-  
-  const timeout = setTimeout(() => {
-    console.log(`⏰ 关闭超时，强制退出`);
-    process.exit(1);
-  }, 15000);
+const shutdown = (signal) => {
+  console.log(`收到 ${signal}，开始优雅关闭...`);
   
   server.close((err) => {
-    clearTimeout(timeout);
-    
     if (err) {
-      console.error(`❌ 服务器关闭时出错:`, err);
+      console.error('关闭服务器时出错:', err);
       process.exit(1);
     }
     
-    console.log(`✅ HTTP 服务器已关闭`);
+    console.log('HTTP 服务器已关闭');
     
-    proxy.close(() => {
-      console.log(`✅ 代理服务器已关闭`);
-      console.log(`�� 进程即将退出`);
+    if (proxy.close) {
+      proxy.close(() => {
+        console.log('代理服务器已关闭');
+        process.exit(0);
+      });
+    } else {
       process.exit(0);
-    });
+    }
   });
+  
+  // 强制退出保护
+  setTimeout(() => {
+    console.log('强制退出');
+    process.exit(1);
+  }, 10000);
 };
 
-// 信号处理
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+// 信号处理 - 移除 SIGTERM 的立即退出
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 // 异常处理
 process.on('uncaughtException', (error) => {
-  console.error(`�� 未捕获的异常:`, error);
-  gracefulShutdown('UNCAUGHT_EXCEPTION');
+  console.error('未捕获的异常:', error);
+  // 不要立即退出，给时间完成正在进行的请求
+  setTimeout(() => process.exit(1), 1000);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
-  console.error(`�� 未处理的 Promise 拒绝:`, reason);
-  console.error(`Promise:`, promise);
-  gracefulShutdown('UNHANDLED_REJECTION');
+  console.error('未处理的 Promise 拒绝:', reason);
 });
 
-// 内存监控（可选）
-setInterval(() => {
-  const used = process.memoryUsage();
-  const usage = {
-    rss: Math.round(used.rss / 1024 / 1024 * 100) / 100,
-    heapTotal: Math.round(used.heapTotal / 1024 / 1024 * 100) / 100,
-    heapUsed: Math.round(used.heapUsed / 1024 / 1024 * 100) / 100,
-    external: Math.round(used.external / 1024 / 1024 * 100) / 100
-  };
-  
-  console.log(`�� [Memory] RSS: ${usage.rss}MB, Heap: ${usage.heapUsed}/${usage.heapTotal}MB, External: ${usage.external}MB`);
-}, 60000); // 每分钟输出一次
-
-console.log(`�� 调试信息:`);
-console.log(`   当前工作目录: ${process.cwd()}`);
-console.log(`   命令行参数: ${process.argv.join(' ')}`);
-console.log(`   环境: ${process.env.NODE_ENV || 'development'}`);
+console.log('�� 代理服务器初始化完成，等待启动...');
 
 
 // const express = require('express');
