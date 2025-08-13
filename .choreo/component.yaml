@@ -1,9 +1,0 @@
-schemaVersion: 1.2
-endpoints:
-  - name: main-proxy
-    type: WS # 我们将所有流量都声明为 WS，因为 WS 端点也能处理初始的 HTTP 握手
-    networkVisibilities:
-      - Public
-    service:
-      port: 7890 # 我们的应用只监听这一个端口
-      basePath: / # 捕获所有路径
