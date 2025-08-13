@@ -1,90 +1,64 @@
+// index.js - 用于 Render 部署
+
 // 1. 引入依赖
 require('dotenv').config();
 const express = require('express');
-const http = require('http');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 
 // 2. 检查环境变量
+// 在 Render 的 Environment 页面设置 TARGET_HOST
 const TARGET_HOST = process.env.TARGET_HOST;
 if (!TARGET_HOST) {
   console.error('错误: 环境变量 TARGET_HOST 未设置。');
   process.exit(1);
 }
 
-// 3. 初始化应用和服务器
+// 3. 初始化 Express 应用
 const app = express();
-const server = http.createServer(app);
-const PORT = 7890; // 只使用这一个端口
+// Render 会通过 PORT 环境变量告诉你应该监听哪个端口
+const PORT = process.env.PORT || 3000;
 
-// --- 4. 创建两个代理实例 ---
-
-// 代理 A: 专门处理 WebSocket
-const wsProxy = createProxyMiddleware({
+// 4. 设置统一的代理中间件
+const proxy = createProxyMiddleware({
+  // 目标服务器地址
   target: TARGET_HOST,
-  changeOrigin: true,
+
+  // 核心：启用 WebSocket 和修改 Origin/Host 头
   ws: true,
-  pathRewrite: {
-    '^/ws': '', // 去掉 /ws 前缀
-  },
-  onProxyReqWs: (proxyReq, req, socket, options, head) => {
-    proxyReq.setHeader('Origin', TARGET_HOST);
-  },
-  logLevel: 'debug',
-  logProvider: () => console, // 确保日志能输出
-});
-
-// 代理 B: 专门处理普通 HTTP
-const httpProxy = createProxyMiddleware({
-  target: TARGET_HOST,
   changeOrigin: true,
-  ws: false,
+
+  // 路径重写：处理客户端可能发往 /ws 的特殊路径
+  // 如果你的客户端直接请求 /socket.io/，可以注释掉这部分
+  pathRewrite: {
+    '^/ws': '', 
+  },
+
+  // 在请求被代理前，确保 Origin 头被正确设置
   onProxyReq: (proxyReq, req, res) => {
+    // 这一步是代理到 Hugging Face Space 的关键
     proxyReq.setHeader('Origin', TARGET_HOST);
   },
+  
+  // 为了便于在 Render 日志中调试，开启 debug 日志
   logLevel: 'debug',
-  logProvider: () => console,
 });
 
+// 5. 应用中间件
+// 将所有进来的请求都交给代理处理
+app.use(proxy);
 
-// --- 5. 智能路由核心 ---
-
-// 对所有路径应用一个中间件
-app.use((req, res, next) => {
-  // 检查是否是 WebSocket 升级请求
-  if (req.headers.upgrade && req.headers.upgrade.toLowerCase() === 'websocket') {
-    // 如果是，什么都不做，让它传递给服务器的 'upgrade' 事件监听器
-    console.log(`[Router] Passing upgrade request to WS proxy: ${req.url}`);
-    return next();
-  }
-  // 如果是普通 HTTP 请求，则交给 httpProxy 处理
-  console.log(`[Router] Passing HTTP request to HTTP proxy: ${req.url}`);
-  return httpProxy(req, res, next);
+// 6. 启动服务器
+const server = app.listen(PORT, () => {
+  console.log(`代理服务器已在 Render 上启动，监听端口 ${PORT}`);
+  console.log(`正在将所有请求代理到 -> ${TARGET_HOST}`);
 });
 
-// 监听服务器的 'upgrade' 事件，并手动交给 wsProxy 处理
-server.on('upgrade', (req, socket, head) => {
-  // 只有路径匹配 /ws/... 的升级请求才会被处理
-  if (req.url.startsWith('/ws')) {
-    console.log(`[Upgrade Handler] Forwarding to wsProxy: ${req.url}`);
-    wsProxy.upgrade(req, socket, head);
-  } else {
-    console.log(`[Upgrade Handler] Destroying socket for unhandled path: ${req.url}`);
-    socket.destroy();
-  }
-});
-
-
-// --- 6. 启动服务器 ---
-server.listen(PORT, () => {
-  console.log(`Unified Proxy Server listening on port ${PORT}`);
-});
-
-// --- 7. 优雅关闭 ---
+// 优雅地处理服务器关闭
 process.on('SIGTERM', () => {
-  console.log('Received SIGTERM, shutting down server...');
-  server.close(() => {
-    console.log('Server closed.');
-  });
+    console.log('收到 SIGTERM，正在关闭服务器...');
+    server.close(() => {
+        console.log('服务器已关闭。');
+    });
 });
 
 
