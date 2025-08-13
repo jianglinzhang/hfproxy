@@ -2,9 +2,9 @@
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
-const https = require('https'); 
-const WebSocket = require('ws');
-const { URL } = require('url');
+const https = require('https');
+const { Server } = require("socket.io");
+const { io: Client } = require("socket.io-client");
 
 // 2. 检查环境变量
 const TARGET_HOST = process.env.TARGET_HOST;
@@ -12,129 +12,104 @@ if (!TARGET_HOST) {
   console.error('错误: 环境变量 TARGET_HOST 未设置。');
   process.exit(1);
 }
-const targetUrl = new URL(TARGET_HOST);
 
-// 3. 初始化 Express 应用
+// 3. 初始化 Express 和 HTTP 服务器
 const app = express();
+const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
-// 4. 手动处理所有 HTTP/HTTPS 请求
-app.use('*', (client_req, client_res) => {
-  console.log(`[HTTP] Intercepting: ${client_req.method} ${client_req.originalUrl}`);
+// 4. --- 协议桥核心：配置我们自己的 Socket.IO 服务器 ---
+// 客户端会连接到这个服务器
+const io = new Server(server, {
+  // 关键：匹配客户端尝试连接的路径
+  path: "/ws/socket.io/", 
+  // 允许所有来源连接，并只使用最兼容的协议
+  cors: {
+    origin: "*",
+  },
+  transports: ["polling", "websocket"] // 允许 polling 和 websocket
+});
 
-  // 构造发往目标服务器的请求选项
+// 5. 当有客户端连接到我们的服务器时
+io.on('connection', (clientSocket) => {
+  console.log(`[Bridge] Client connected: ${clientSocket.id}`);
+
+  // 为这个客户端，创建一个到目标服务器的连接
+  const targetSocket = Client(TARGET_HOST, {
+    // 目标服务器的路径通常是 /socket.io/
+    path: "/socket.io/",
+    transports: ["websocket"] // 强制使用 WebSocket 连接到目标
+  });
+
+  console.log(`[Bridge] Connecting client ${clientSocket.id} to target ${TARGET_HOST}`);
+
+  // --- 消息转发 ---
+  // 使用 onAny 捕获所有事件并转发
+  clientSocket.onAny((event, ...args) => {
+    console.log(`[Client -> Target] Event: ${event}`);
+    targetSocket.emit(event, ...args);
+  });
+
+  targetSocket.onAny((event, ...args) => {
+    console.log(`[Target -> Client] Event: ${event}`);
+    clientSocket.emit(event, ...args);
+  });
+
+  // --- 生命周期管理 ---
+  targetSocket.on('connect_error', (err) => {
+    console.error(`[Bridge] Target connection error for client ${clientSocket.id}:`, err.message);
+    clientSocket.disconnect();
+  });
+
+  clientSocket.on('disconnect', (reason) => {
+    console.log(`[Bridge] Client ${clientSocket.id} disconnected. Reason: ${reason}. Closing target connection.`);
+    targetSocket.disconnect();
+  });
+
+  targetSocket.on('disconnect', (reason) => {
+    console.log(`[Bridge] Target disconnected for client ${clientSocket.id}. Reason: ${reason}. Closing client connection.`);
+    clientSocket.disconnect();
+  });
+});
+
+// 6. --- 静态资源代理 ---
+// 所有非 Socket.IO 的请求都由这个手动 HTTP 代理处理
+app.use((client_req, client_res) => {
+  // 避免代理我们自己的 Socket.IO 路径
+  if (client_req.url.startsWith('/ws/socket.io')) {
+    return;
+  }
+  
+  console.log(`[HTTP Proxy] Forwarding: ${client_req.method} ${client_req.originalUrl}`);
+
   const options = {
-    hostname: targetUrl.hostname,
-    port: targetUrl.port || (targetUrl.protocol === 'https:' ? 443 : 80),
+    hostname: new URL(TARGET_HOST).hostname,
+    port: 443,
     path: client_req.originalUrl,
     method: client_req.method,
-    headers: {
-      ...client_req.headers,
-      'host': targetUrl.hostname, // 必须修改 host
-      'origin': TARGET_HOST,      // 必须修改 origin
-      'referer': TARGET_HOST,     // 最好也修改 referer
-    },
+    headers: { ...client_req.headers, host: new URL(TARGET_HOST).hostname },
   };
 
-  // 创建到目标服务器的请求
   const proxy_req = https.request(options, (proxy_res) => {
-    console.log(`[HTTP] Response from target: ${proxy_res.statusCode}`);
-    
-    // 将目标服务器的响应头写回客户端，并添加CORS头
     client_res.writeHead(proxy_res.statusCode, {
       ...proxy_res.headers,
       'access-control-allow-origin': '*',
     });
-
-    // 将目标服务器的响应体通过管道流回客户端
     proxy_res.pipe(client_res, { end: true });
   });
 
-  // 将客户端的请求体通过管道流到目标服务器
   client_req.pipe(proxy_req, { end: true });
-
   proxy_req.on('error', (err) => {
-    console.error('[HTTP] Proxy Request Error:', err);
-    if (!client_res.headersSent) {
-      client_res.status(502).send('Bad Gateway');
-    }
+    console.error('[HTTP Proxy] Error:', err);
+    if (!client_res.headersSent) client_res.status(502).send('Bad Gateway');
   });
 });
 
-// 5. 创建 HTTP 服务器并启动
-const server = http.createServer(app);
+
+// 7. 启动服务器
 server.listen(PORT, () => {
-  console.log(`手动代理服务器已启动，监听端口 ${PORT}`);
-  console.log(`正在代理到 -> ${TARGET_HOST}`);
-});
-
-// 6. 手动处理 WebSocket 升级请求
-const wss = new WebSocket.Server({ noServer: true });
-
-server.on('upgrade', (req, client_socket, head) => {
-  // 只处理我们关心的路径
-  if (req.url.startsWith('/ws/socket.io')) {
-    const target_path = req.url.substring(3); // 去掉 '/ws'
-    const target_ws_url = `wss://${targetUrl.hostname}${target_path}`;
-    
-    console.log(`[WS] Intercepting upgrade request for: ${req.url}`);
-    console.log(`[WS] Connecting to target: ${target_ws_url}`);
-
-    // 创建到目标 WebSocket 服务器的连接
-    const target_ws = new WebSocket(target_ws_url, {
-      origin: TARGET_HOST, // 设置正确的 Origin
-      headers: { ...req.headers, host: targetUrl.hostname }
-    });
-
-    // 客户端连接处理
-    wss.handleUpgrade(req, client_socket, head, (client_ws) => {
-      console.log('[WS] Client connected.');
-      
-      // 双向转发消息
-      target_ws.on('message', (message) => {
-        if (client_ws.readyState === WebSocket.OPEN) {
-          client_ws.send(message);
-        }
-      });
-      client_ws.on('message', (message) => {
-        if (target_ws.readyState === WebSocket.OPEN) {
-          target_ws.send(message);
-        }
-      });
-
-      // 处理关闭事件
-      target_ws.on('close', (code, reason) => {
-        console.log('[WS] Target closed connection.');
-        if (client_ws.readyState === WebSocket.OPEN) {
-          client_ws.close(code, reason.toString());
-        }
-      });
-      client_ws.on('close', (code, reason) => {
-        console.log('[WS] Client closed connection.');
-        if (target_ws.readyState === WebSocket.OPEN) {
-          target_ws.close(code, reason.toString());
-        }
-      });
-
-      // 处理错误事件
-      target_ws.on('error', (err) => {
-        console.error('[WS] Target error:', err);
-        if (client_ws.readyState === WebSocket.OPEN) {
-          client_ws.close(1011, 'Target connection error');
-        }
-      });
-      client_ws.on('error', (err) => {
-        console.error('[WS] Client error:', err);
-        if (target_ws.readyState === WebSocket.OPEN) {
-          target_ws.close(1011, 'Client connection error');
-        }
-      });
-    });
-  } else {
-    // 如果不是我们想处理的 WebSocket，销毁它
-    console.log(`[WS] Ignoring upgrade request for unknown path: ${req.url}`);
-    client_socket.destroy();
-  }
+  console.log(`协议桥服务器已启动，监听端口 ${PORT}`);
+  console.log(`正在桥接到 -> ${TARGET_HOST}`);
 });
 
 
