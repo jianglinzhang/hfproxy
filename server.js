@@ -14,76 +14,40 @@ if (!TARGET_HOST) {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 4. 设置统一的代理中间件
-const proxy = createProxyMiddleware({
-  // 目标服务器
+// 4. 设置代理中间件
+const proxyOptions = {
+  // 目标服务器地址
   target: TARGET_HOST,
 
-  // 核心：必须为 true，让代理能够自动处理 HTTP 和 WebSocket
+  // 启用 WebSocket 和修改 Origin
   ws: true,
-  
-  // 核心：必须为 true，修改 Host 头
   changeOrigin: true,
 
-  // 路径重写，处理客户端的 /ws 前缀
+  // 路径重写
   pathRewrite: {
     '^/ws': '',
   },
 
-  // 日志和头修改
-  on: {
-    // 处理普通 HTTP 请求
-    proxyReq: (proxyReq, req, res) => {
-      proxyReq.setHeader('Origin', TARGET_HOST);
-      console.log(`[HTTP Req] ${req.method} ${req.originalUrl} -> ${TARGET_HOST}${proxyReq.path}`);
-    },
-    // 处理 WebSocket 升级请求
-    proxyReqWs: (proxyReq, req, socket, options, head) => {
-      proxyReq.setHeader('Origin', TARGET_HOST);
-      console.log(`[WS Req] ${req.url} -> ${TARGET_HOST}${proxyReq.path}`);
-    },
-    // 处理所有响应
-    proxyRes: (proxyRes, req, res) => {
-      // 确保所有响应都允许跨域
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', '*');
-      console.log(`[Res] ${req.method} ${req.originalUrl} -> Status: ${proxyRes.statusCode}`);
-    },
-    // 统一错误处理
-    error: (err, req, res) => {
-      console.error('[Proxy Error]', err);
-      // 根据请求类型决定如何响应错误
-      if (req.headers.upgrade === 'websocket') {
-        if (res.socket) res.socket.end();
-      } else {
-        if (res && !res.headersSent) {
-          res.writeHead(500, { 'Content-Type': 'text/plain' });
-          res.end('Proxy error: ' + err.message);
-        }
-      }
-    }
+  // 修改请求头
+  onProxyReq: (proxyReq, req, res) => {
+    // 确保 Origin 头被正确设置
+    proxyReq.setHeader('Origin', TARGET_HOST);
   },
   
-  // 增加日志级别，便于观察内部决策
-  logLevel: 'debug'
-});
+  // 为了调试，我们保留日志
+  logLevel: 'debug',
+};
+
+const proxy = createProxyMiddleware(proxyOptions);
 
 // 5. 应用中间件
-// 将所有请求都交给这一个代理实例处理
-app.use('/', proxy);
+app.use(proxy);
 
 // 6. 启动服务器
-// 不需要手动创建 http server，app.listen() 会为我们处理好
 const server = app.listen(PORT, () => {
   console.log(`代理服务器已启动，监听端口 ${PORT}`);
-  console.log(`正在将所有请求代理到 -> ${TARGET_HOST}`);
+  console.log(`正在代理到 -> ${TARGET_HOST}`);
 });
-
-// 7. http-proxy-middleware 会自动处理 upgrade 事件
-// 我们需要确保服务器实例能被访问到，以便代理附加监听器
-// app.listen() 返回的 server 对象已经足够
-// （实际上，http-proxy-middleware 内部会处理好，我们不需要额外操作）
 
 // 优雅地处理服务器关闭
 process.on('SIGTERM', () => {
