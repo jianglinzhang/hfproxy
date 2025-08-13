@@ -37,14 +37,14 @@ const io = new Server(server, {
 
 // 5. 当有客户端连接到我们的服务器时，为其建立一个到目标的连接
 io.on('connection', (clientSocket) => {
-  console.log(`[Bridge] Client connected: ${clientSocket.id}`);
+  // console.log(`[Bridge] Client connected: ${clientSocket.id}`);
 
   // 为这个客户端，创建一个到目标服务器（CF/Deno代理）的连接
   // 注意：因为 CF/Deno 代理可能也需要 /ws 前缀，所以我们在这里构建路径
   const targetUrl = new URL(TARGET_HOST);
   const targetPath = clientSocket.request.url.startsWith('/ws') ? '/ws/socket.io/' : '/socket.io/';
   
-  console.log(`[Bridge] Connecting client ${clientSocket.id} to target ${TARGET_HOST} with path ${targetPath}`);
+  // console.log(`[Bridge] Connecting client ${clientSocket.id} to target ${TARGET_HOST} with path ${targetPath}`);
 
   const targetSocket = Client(TARGET_HOST, {
     path: targetPath,
@@ -54,19 +54,19 @@ io.on('connection', (clientSocket) => {
   // --- 消息转发 ---
   // 使用 onAny 捕获所有事件并从客户端转发到目标
   clientSocket.onAny((event, ...args) => {
-    console.log(`[Client -> Target] Event: ${event}`);
+    // console.log(`[Client -> Target] Event: ${event}`);
     targetSocket.emit(event, ...args);
   });
 
   // 使用 onAny 捕获所有事件并从目标转发到客户端
   targetSocket.onAny((event, ...args) => {
-    console.log(`[Target -> Client] Event: ${event}`);
+    // console.log(`[Target -> Client] Event: ${event}`);
     clientSocket.emit(event, ...args);
   });
 
   // --- 生命周期和错误管理 ---
   targetSocket.on('connect', () => {
-    console.log(`[Bridge] Successfully connected to target for client ${clientSocket.id}`);
+    // console.log(`[Bridge] Successfully connected to target for client ${clientSocket.id}`);
   });
   
   targetSocket.on('connect_error', (err) => {
@@ -75,12 +75,12 @@ io.on('connection', (clientSocket) => {
   });
 
   clientSocket.on('disconnect', (reason) => {
-    console.log(`[Bridge] Client ${clientSocket.id} disconnected. Reason: ${reason}. Closing target connection.`);
+    // console.log(`[Bridge] Client ${clientSocket.id} disconnected. Reason: ${reason}. Closing target connection.`);
     targetSocket.disconnect();
   });
 
   targetSocket.on('disconnect', (reason) => {
-    console.log(`[Bridge] Target for client ${clientSocket.id} disconnected. Reason: ${reason}. Closing client connection.`);
+    // console.log(`[Bridge] Target for client ${clientSocket.id} disconnected. Reason: ${reason}. Closing client connection.`);
     clientSocket.disconnect();
   });
 });
@@ -94,7 +94,7 @@ app.use((client_req, client_res) => {
     return;
   }
   
-  console.log(`[HTTP Proxy] Forwarding: ${client_req.method} ${client_req.originalUrl}`);
+  // console.log(`[HTTP Proxy] Forwarding: ${client_req.method} ${client_req.originalUrl}`);
 
   const targetUrlForHttp = new URL(TARGET_HOST);
   const options = {
