@@ -1,10 +1,9 @@
+// index.js
+
 // 1. 引入依赖
 require('dotenv').config();
 const express = require('express');
-const http = require('http');
-const https = require('https');
-const { Server } = require("socket.io");
-const { io: Client } = require("socket.io-client");
+const { createProxyMiddleware } = require('http-proxy-middleware');
 
 // 2. 检查环境变量
 const TARGET_HOST = process.env.TARGET_HOST;
@@ -13,104 +12,52 @@ if (!TARGET_HOST) {
   process.exit(1);
 }
 
-// 3. 初始化 Express 和 HTTP 服务器
+// 3. 初始化 Express 应用
 const app = express();
-const server = http.createServer(app);
-const PORT = process.env.PORT || 3000;
+// 监听在 component.yaml 中声明的端口
+const PORT = process.env.PORT || 3000; 
 
-// 4. --- 协议桥核心：配置我们自己的 Socket.IO 服务器 ---
-// 客户端会连接到这个服务器
-const io = new Server(server, {
-  // 关键：匹配客户端尝试连接的路径
-  path: "/ws/socket.io/", 
-  // 允许所有来源连接，并只使用最兼容的协议
-  cors: {
-    origin: "*",
+// 4. 设置统一的代理中间件
+const proxy = createProxyMiddleware({
+  target: TARGET_HOST,
+  ws: true, // 启用 WebSocket 代理
+  changeOrigin: true, // 修改 Host 头
+
+  // 路径重写，以处理客户端可能存在的 /ws 前缀
+  pathRewrite: (path, req) => {
+    const newPath = path.startsWith('/ws') ? path.substring(3) : path;
+    console.log(`[Path Rewrite] From "${path}" to "${newPath}"`);
+    return newPath;
   },
-  transports: ["polling", "websocket"] // 允许 polling 和 websocket
+
+  on: {
+    proxyReq: (proxyReq, req, res) => {
+      proxyReq.setHeader('Origin', TARGET_HOST);
+      console.log(`[Proxy Req] ${req.method} ${req.originalUrl} -> ${TARGET_HOST}${proxyReq.path}`);
+    },
+    proxyReqWs: (proxyReq, req, socket, options, head) => {
+        proxyReq.setHeader('Origin', TARGET_HOST);
+        console.log(`[Proxy WS Req] ${req.url} -> ${TARGET_HOST}${proxyReq.path}`);
+    },
+    error: (err, req, res) => {
+      console.error('[Proxy Error]', err);
+    }
+  },
+
+  logLevel: 'debug',
 });
 
-// 5. 当有客户端连接到我们的服务器时
-io.on('connection', (clientSocket) => {
-  console.log(`[Bridge] Client connected: ${clientSocket.id}`);
+// 5. 应用中间件
+app.use('/', proxy);
 
-  // 为这个客户端，创建一个到目标服务器的连接
-  const targetSocket = Client(TARGET_HOST, {
-    // 目标服务器的路径通常是 /socket.io/
-    path: "/socket.io/",
-    transports: ["websocket"] // 强制使用 WebSocket 连接到目标
-  });
-
-  console.log(`[Bridge] Connecting client ${clientSocket.id} to target ${TARGET_HOST}`);
-
-  // --- 消息转发 ---
-  // 使用 onAny 捕获所有事件并转发
-  clientSocket.onAny((event, ...args) => {
-    console.log(`[Client -> Target] Event: ${event}`);
-    targetSocket.emit(event, ...args);
-  });
-
-  targetSocket.onAny((event, ...args) => {
-    console.log(`[Target -> Client] Event: ${event}`);
-    clientSocket.emit(event, ...args);
-  });
-
-  // --- 生命周期管理 ---
-  targetSocket.on('connect_error', (err) => {
-    console.error(`[Bridge] Target connection error for client ${clientSocket.id}:`, err.message);
-    clientSocket.disconnect();
-  });
-
-  clientSocket.on('disconnect', (reason) => {
-    console.log(`[Bridge] Client ${clientSocket.id} disconnected. Reason: ${reason}. Closing target connection.`);
-    targetSocket.disconnect();
-  });
-
-  targetSocket.on('disconnect', (reason) => {
-    console.log(`[Bridge] Target disconnected for client ${clientSocket.id}. Reason: ${reason}. Closing client connection.`);
-    clientSocket.disconnect();
-  });
+// 6. 启动服务器
+const server = app.listen(PORT, () => {
+  console.log(`代理服务器已启动，监听端口 ${PORT}`);
+  console.log(`正在代理到 -> ${TARGET_HOST}`);
 });
 
-// 6. --- 静态资源代理 ---
-// 所有非 Socket.IO 的请求都由这个手动 HTTP 代理处理
-app.use((client_req, client_res) => {
-  // 避免代理我们自己的 Socket.IO 路径
-  if (client_req.url.startsWith('/ws/socket.io')) {
-    return;
-  }
-  
-  console.log(`[HTTP Proxy] Forwarding: ${client_req.method} ${client_req.originalUrl}`);
-
-  const options = {
-    hostname: new URL(TARGET_HOST).hostname,
-    port: 443,
-    path: client_req.originalUrl,
-    method: client_req.method,
-    headers: { ...client_req.headers, host: new URL(TARGET_HOST).hostname },
-  };
-
-  const proxy_req = https.request(options, (proxy_res) => {
-    client_res.writeHead(proxy_res.statusCode, {
-      ...proxy_res.headers,
-      'access-control-allow-origin': '*',
-    });
-    proxy_res.pipe(client_res, { end: true });
-  });
-
-  client_req.pipe(proxy_req, { end: true });
-  proxy_req.on('error', (err) => {
-    console.error('[HTTP Proxy] Error:', err);
-    if (!client_res.headersSent) client_res.status(502).send('Bad Gateway');
-  });
-});
-
-
-// 7. 启动服务器
-server.listen(PORT, () => {
-  console.log(`协议桥服务器已启动，监听端口 ${PORT}`);
-  console.log(`正在桥接到 -> ${TARGET_HOST}`);
-});
+// http-proxy-middleware 会自动处理服务器的 'upgrade' 事件
+// 不需要我们手动操作
 
 
 // const express = require('express');
