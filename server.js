@@ -2,7 +2,6 @@
 require('dotenv').config();
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
-const { URL } = require('url'); // 引入 URL 模块
 
 // 2. 检查环境变量
 const TARGET_HOST = process.env.TARGET_HOST;
@@ -10,9 +9,6 @@ if (!TARGET_HOST) {
   console.error('错误: 环境变量 TARGET_HOST 未设置。');
   process.exit(1);
 }
-
-// 从 TARGET_HOST 提取 hostname，例如 'xxx-fastchat.hf.space'
-const targetHostname = new URL(TARGET_HOST).hostname;
 
 // 3. 初始化 Express 应用
 const app = express();
@@ -24,63 +20,60 @@ const proxy = createProxyMiddleware({
   ws: true,           // 必须：启用 WebSocket 代理
   changeOrigin: true, // 必须：修改请求头中的 'Host' 为目标 'Host'
 
-  // --- 关键修复 ---
-  // 这个钩子函数在 WebSocket 升级请求被发送前触发
-  onProxyReqWs: (proxyReq, req, socket, options, head) => {
-    console.log(`[Proxy WS Req] Modifying headers for: ${req.url}`);
-    // 核心修复：将 Origin 设置为目标服务器的 Origin，模拟同源请求
-    proxyReq.setHeader('Origin', TARGET_HOST);
-    proxyReq.setHeader('Referer', TARGET_HOST); // 同时设置 Referer 以增强兼容性
-    console.log(`[Proxy WS Req] New Origin: ${TARGET_HOST}`);
+  // --- 关键修复：路径重写 ---
+  // 将客户端请求路径中的 /ws 前缀去掉，再发往目标服务器
+  // 例如: /ws/socket.io/ -> /socket.io/
+  pathRewrite: {
+    '^/ws': '', 
   },
 
-  // --- 同样为普通 HTTP 请求应用修复 ---
-  // 这个钩子函数在普通 HTTP 请求被发送前触发
-  // 对于 Socket.IO，初始连接是 HTTP，所以这里也必须修改
+  // --- 关键修复：修改请求头 ---
   onProxyReq: (proxyReq, req, res) => {
-    console.log(`[Proxy HTTP Req] ${req.method} ${req.originalUrl}`);
-    // 核心修复：将 Origin 和 Referer 设置为目标服务器的地址
+    // 为所有请求（包括Socket.IO的初始HTTP握手）修改Origin
     proxyReq.setHeader('Origin', TARGET_HOST);
-    proxyReq.setHeader('Referer', TARGET_HOST);
-    console.log(` -> ${TARGET_HOST}${proxyReq.path}`);
+    console.log(`[Proxy HTTP Req] ${req.method} ${req.originalUrl} -> Rewritten to: ${proxyReq.path}`);
+  },
+  onProxyReqWs: (proxyReq, req, socket, options, head) => {
+    // 为WebSocket升级请求修改Origin
+    proxyReq.setHeader('Origin', TARGET_HOST);
+    console.log(`[Proxy WS Req] ${req.url} -> Rewritten to: ${proxyReq.path}`);
   },
 
   // --- 增强配置 (保留) ---
-  timeout: 60000,
-  proxyTimeout: 60000,
-  
   onProxyRes: (proxyRes, req, res) => {
-    // 为所有从目标服务器返回的响应添加CORS头，确保浏览器不会阻止响应
+    // 确保所有响应都允许跨域，这对于前端应用至关重要
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', '*');
     console.log(`[Proxy HTTP Res] ${req.method} ${req.originalUrl} -> Status: ${proxyRes.statusCode}`);
   },
-
   onError: (err, req, res) => {
     console.error('[Proxy Error]', err);
-    if (res && !res.headersSent) {
-      // 检查 res 是否是 ServerResponse 的实例，因为 WebSocket 错误时 res 是一个 Socket
-      if (res.writeHead) {
-        res.writeHead(500, {
-          'Content-Type': 'text/plain',
-        });
-        res.end('Proxy error: ' + err.message);
-      }
+    // 确保在出错时向客户端发送一个响应
+    if (res && res.writeHead && !res.headersSent) {
+      res.writeHead(500, {
+        'Content-Type': 'text/plain',
+      });
+      res.end('Proxy error: ' + err.message);
     }
   }
 });
 
 // 5. 应用中间件
-// 注意：不需要再单独使用 cors() 包，因为 onProxyRes 已经处理了CORS头
-// 如果需要处理 OPTIONS 预检请求，可以保留 cors()
-app.use(require('cors')()); 
-app.use('/', proxy);
+// 将所有 /ws 开头的请求都交给代理处理
+// 注意：这里我们只代理 /ws 路径，避免意外代理其他路径
+app.use('/ws', proxy);
+
+// 添加一个根路径的健康检查，方便确认服务是否启动
+app.get('/', (req, res) => {
+  res.send('Proxy server is running. Connect WebSocket to /ws');
+});
 
 // 6. 启动服务器
 const server = app.listen(PORT, () => {
   console.log(`代理服务器已启动，监听端口 ${PORT}`);
   console.log(`正在代理 -> ${TARGET_HOST}`);
+  console.log('所有 /ws/* 的请求将被代理。');
 });
 
 // 优雅地处理服务器关闭
