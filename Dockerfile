@@ -12,7 +12,6 @@ RUN apk add --no-cache curl unzip \
     && rm /tmp/xray.zip \
     && chmod +x /usr/bin/xray
 
-# --- 以下是主要改动 ---
 
 # 1. 创建并设置工作目录为 /app
 WORKDIR /app
@@ -23,6 +22,8 @@ WORKDIR /app
 
 # 暴露内部端口（仅为说明，Choreo 会自动处理）
 EXPOSE 8181
+
+USER 10014
 
 # 3. 容器启动时，使用 /app 目录下的配置文件
 CMD ["/usr/bin/xray", "run", "-config", "/app/config.json"]
